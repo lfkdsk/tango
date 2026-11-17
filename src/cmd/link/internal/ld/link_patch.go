@@ -543,9 +543,6 @@ func (l *ldPatchContext) toTargetSym(s loader.Sym) llvm.TargetSym {
 
 // iterate each text symbol
 func (l *ldPatchContext) ForEachTextSym(f func(pctxt llvm.PatchContext, tsym llvm.TargetSym, tsymbol *llvm.TargetSymbol)) {
-	// prepare the global file table
-	l.prepareGlobalFileTable(l.p)
-
 	ldr := l.loader
 	var targets []loader.Sym
 	for llvmName := range l.p.SymbolNames() {
@@ -572,7 +569,7 @@ func (l *ldPatchContext) ForEachTextSym(f func(pctxt llvm.PatchContext, tsym llv
 			panic("only llvm can modify goobj symbols")
 		}
 
-		// do the patch work
+		l.prepareGlobalFileTable(l.p)
 		f(l, l.toTargetSym(k), tsymbol)
 
 		count += 1
