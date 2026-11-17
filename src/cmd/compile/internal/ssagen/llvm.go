@@ -18,6 +18,7 @@ package ssagen
 import (
 	"cmd/compile/internal/abi"
 	"cmd/compile/internal/base"
+	"cmd/compile/internal/liveness"
 	"cmd/compile/internal/reflectdata"
 	"cmd/compile/internal/typecheck"
 	"cmd/internal/obj"
@@ -1264,6 +1265,15 @@ func (b *builder) createFunctionStart() {
 	}
 	if curfn.LSym.NoSplit() {
 		b.llvmFn.AddFunctionAttr(b.ctx.CreateStringAttribute(GO_NOSPLIT, "true"))
+	}
+	// Match the gc backend's whole-function unsafe-point policy, including
+	// explicit nosplit leaf functions. Record the reason for the inlining policy.
+	if liveness.IsUnsafe(f) {
+		reason := "nosplit"
+		if base.Flag.CompilingRuntime {
+			reason = "CompilingRuntime"
+		}
+		b.llvmFn.AddFunctionAttr(b.ctx.CreateStringAttribute("go.allunsafe", reason))
 	}
 	if curfn.LSym.NeedCtxt() {
 		b.llvmFn.AddFunctionAttr(b.ctx.CreateStringAttribute(GO_NEEDCTXT, "true"))
