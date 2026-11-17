@@ -818,9 +818,14 @@ func (l *ldPatchContext) PatchPCData(tsym llvm.TargetSym, pcspsym, pcfilesym, pc
 
 	pcdata = ldr.Pcdata(f, pcdata)
 	if pcarglivesym != nil {
-		// TODO: it is nil right now but we still keep the code
-		// because we will support ArgLiveInfo soon
-		l.patchPCData(f, abi.PCDATA_ArgLiveIndex, pcdata, pcarglivesym)
+		id := abi.PCDATA_ArgLiveIndex
+		pcdata = ldr.EnsurePCOrFuncdata(f, goobj.AuxPcdata, pcdata, id)
+		var auxbuf [8]*goobj.Aux
+		aux := ldr.DataAuxs(f, goobj.AuxPcdata, auxbuf[:])[id]
+		s := ldr.MakeSymbolBuilder("")
+		s.SetType(sym.SRODATA)
+		l.patchSymbol(s.Sym(), pcarglivesym)
+		aux.SetSym(goobj.SymRef{SymIdx: uint32(s.Sym())})
 	} else {
 		l.removePCData(abi.PCDATA_ArgLiveIndex, pcdata)
 	}
@@ -832,7 +837,22 @@ func (l *ldPatchContext) PatchFuncData(fsym llvm.TargetSym, fdid int, fdsymbol *
 	name := ldr.SymName(f)
 
 	var tmp [8]loader.Sym
-	data := ldr.EnsureFuncdata(f, tmp[:], fdid)
+	data := ldr.EnsurePCOrFuncdata(f, goobj.AuxFuncdata, tmp[:], fdid)
+	if fdid == abi.FUNCDATA_ArgInfo || fdid == abi.FUNCDATA_ArgLiveInfo {
+		var buf [8]*goobj.Aux
+		aux := ldr.DataAuxs(f, goobj.AuxFuncdata, buf[:])[fdid]
+		ref := goobj.SymRef{}
+		if fdsymbol != nil {
+			// The old data may be shared. Replace the reference with a new symbol.
+			s := ldr.MakeSymbolBuilder(fdsymbol.HostName)
+			s.SetType(sym.SRODATA)
+			s.SetLocal(true)
+			l.patchSymbol(s.Sym(), fdsymbol)
+			ref.SymIdx = uint32(s.Sym())
+		}
+		aux.SetSym(ref)
+		return
+	}
 	if fdid == abi.FUNCDATA_OpenCodedDeferInfo {
 		// Go may have deduplicated identical defer tables across functions.
 		// Use the normal copy-on-patch path before replacing the frame offsets.

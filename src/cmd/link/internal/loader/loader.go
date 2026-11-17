@@ -2223,7 +2223,7 @@ func (l *Loader) LocalSymVersion(i Sym) int {
 	return l.objs[pp.objidx].version
 }
 
-func (l *Loader) EnsureFuncdata(i Sym, tmp []Sym, fid int) []Sym {
+func (l *Loader) EnsurePCOrFuncdata(i Sym, kind uint8, tmp []Sym, fid int) []Sym {
 	if !l.IsExternal(i) {
 		panic("must be external first")
 	}
@@ -2231,7 +2231,7 @@ func (l *Loader) EnsureFuncdata(i Sym, tmp []Sym, fid int) []Sym {
 	r, auxs := l.auxs(i)
 	for j := range auxs {
 		a := &auxs[j]
-		if a.Type() == goobj.AuxFuncdata {
+		if a.Type() == kind {
 			fd = append(fd, l.resolve(r, a.Sym()))
 		}
 	}
@@ -2245,7 +2245,7 @@ func (l *Loader) EnsureFuncdata(i Sym, tmp []Sym, fid int) []Sym {
 	for j := len(fd); j <= fid; j++ {
 		fd = append(fd, 0)
 		var a goobj.Aux
-		a.SetType(goobj.AuxFuncdata)
+		a.SetType(kind)
 		a.SetSym(goobj.SymRef{PkgIdx: uint32(0), SymIdx: uint32(0)})
 		pl.auxs = append(pl.auxs, a)
 	}

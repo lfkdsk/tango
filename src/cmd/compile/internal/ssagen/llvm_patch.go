@@ -144,6 +144,24 @@ func (c *gcPatchCtxt) PatchFuncData(fsym llvm.TargetSym, fdid int, fdsymbol *llv
 	switch fdid {
 	case abi.FUNCDATA_OpenCodedDeferInfo:
 		patchSymbol(fninfo.OpenCodedDeferInfo, fdsymbol)
+	case abi.FUNCDATA_ArgInfo, abi.FUNCDATA_ArgLiveInfo:
+		var data *obj.LSym
+		if fdsymbol != nil {
+			data = &obj.LSym{
+				Name:      fdsymbol.HostName,
+				Attribute: obj.AttrContentAddressable,
+			}
+			patchSymbol(data, fdsymbol)
+			objw.Global(data, int32(len(data.P)), obj.RODATA)
+			addFuncData(f, fdid, data)
+		} else {
+			removeFuncData(f, fdid)
+		}
+		if fdid == abi.FUNCDATA_ArgInfo {
+			fninfo.ArgInfo = data
+		} else {
+			fninfo.ArgLiveInfo = data
+		}
 	case abi.FUNCDATA_StackObjects:
 		if fdsymbol == nil {
 			fninfo.StackObjects = nil
