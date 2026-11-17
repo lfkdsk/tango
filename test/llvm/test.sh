@@ -73,6 +73,7 @@ TESTS=(slice quicksort intglobal \
     ceil \
     com \
     convert \
+    unsafeconvert_keepalive \
     ctz \
     div128u \
     eqptr \
@@ -146,8 +147,13 @@ for T in "${TESTS[@]}"
 do
     TBIN_PATH=$test_cache/bin/$T
 
+    test_gcflags=(-gcflags all="$GCFLAGS")
+    if [[ "$T" == "unsafeconvert_keepalive" ]]; then
+        # The VarLive sample uses the standard library's uintptrkeepalive directive.
+        test_gcflags+=(-gcflags command-line-arguments="$GCFLAGS -std")
+    fi
     echo "Building tests $T"
-    env -u GOROOT GOEXPERIMENT=tangollvm "$GO_BIN" build -o "$TBIN_PATH" -gcflags all="$GCFLAGS" "$DIR/$T.go"
+    env -u GOROOT GOEXPERIMENT=tangollvm "$GO_BIN" build -o "$TBIN_PATH" "${test_gcflags[@]}" "$DIR/$T.go"
     if (( $? != 0 )); then
         echo "Failed to build test $T"
         RESULTS+=("$T ...FAILED to build")
@@ -155,7 +161,11 @@ do
         continue
     fi
 
-    "$TBIN_PATH"
+    if [[ "$T" == "unsafeconvert_keepalive" ]]; then
+        GODEBUG=gccheckmark=1 GOGC=1 "$TBIN_PATH"
+    else
+        "$TBIN_PATH"
+    fi
     if (( $? != 0 )); then
         echo "Failed to run test $T"
         RESULTS+=("$T ...FAILED")

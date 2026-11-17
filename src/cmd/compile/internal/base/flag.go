@@ -207,7 +207,7 @@ func parseBeastOption(beastStr string) {
 		Flag.Cfg.BeastOpt.IntrinsifyMemmove = 0
 		Flag.Cfg.BeastOpt.AMD64TargetFeature = 3
 		Flag.Cfg.BeastOpt.FullLTO = 0
-		Flag.Cfg.BeastOpt.OPConvert = 0
+		Flag.Cfg.BeastOpt.OPConvert = 1
 	}
 	for oname, val := range flag_beast.ParseBeastArguments(beastStr) {
 		if opt, ok := beastVars[oname]; ok {

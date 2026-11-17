@@ -585,6 +585,7 @@ type compilerContext struct {
 
 	// intrinsics
 	goPreAllocatedID int
+	goMetadataID     int
 
 	// the map for the declared type for runtime builtins
 	runtimeBuiltdinMap map[string]llvm.Type
@@ -933,7 +934,8 @@ func newCompilerContext(moduleName string, machine llvm.TargetMachine, config *l
 	c.fakeRecvType = c.getLLVMType(types.FakeRecvType())
 
 	c.goPreAllocatedID = llvm.LookupIntrinsicID("llvm.go.preallocated")
-	if c.goPreAllocatedID == 0 {
+	c.goMetadataID = llvm.LookupIntrinsicID("llvm.go.metadata")
+	if c.goPreAllocatedID == 0 || c.goMetadataID == 0 {
 		panic("cannot find intrinsic id")
 	}
 
@@ -1523,6 +1525,10 @@ func (b *builder) curfn() *ir.Func {
 func (b *builder) checkFeasibility() string {
 	curfn := b.curfn()
 
+	// The backend uses calls to this symbol as liveness markers.
+	if curfn.LSym.Name == "runtime.KeepAlive" {
+		return "keep runtime.KeepAlive opaque"
+	}
 	if isDenylisted(b.functag) {
 		return "denylisted"
 	}
@@ -1587,8 +1593,6 @@ func (b *builder) checkFeasibility() string {
 				return "TODO: amd64 intrinsics is not supported yet"
 			case ssa.OpTailCall:
 				return "tail call optimization is not enabled for Go ABI internal"
-			case ssa.OpKeepAlive, ssa.OpVarLive:
-				return "TODO: KeepAlive or VarLive"
 			case ssa.OpConvert:
 				if base.Flag.Cfg.BeastOpt.OPConvert > 0 {
 					from := isNotInHeapTy(instr.Args[0].Type)
@@ -1604,6 +1608,9 @@ func (b *builder) checkFeasibility() string {
 			}
 			if aux, ok := instr.Aux.(*ssa.AuxCall); ok {
 				if aux.Fn != nil {
+					if aux.Fn.Name == "runtime.KeepAlive" {
+						return "non-intrinsic call to runtime.KeepAlive"
+					}
 					if aux.Fn.ABI() != obj.ABIInternal {
 						// return "only ABIInternal is supported and ABI0 is not supported"
 					}
@@ -2141,6 +2148,19 @@ func (b *builder) makeCall(t llvm.Type, callee llvm.Value, args []llvm.Value, cc
 	return call
 }
 
+// createKeepAlive emits the phantom call recognized by the LLVM Go backend.
+func (b *builder) createKeepAlive(ptr llvm.Value) {
+	const name = "runtime.KeepAlive"
+	fn := b.mod.NamedFunction(name)
+	if fn.IsNil() {
+		t := llvm.FunctionType(b.voidType, []llvm.Type{b.ptrType, b.ptrType}, false)
+		fn = llvm.AddFunction(b.mod, name, t)
+		fn.GlobalSetMetadata(b.ctx.MDKindID("go.global"), b.ctx.MDNode(nil))
+		fn.SetFunctionCallConv(llvm.GO_ABIINTERNAL_CCONV)
+	}
+	b.makeCall(fn.FunctionType(), fn, []llvm.Value{llvm.Undef(b.ptrType), b.toPtr(ptr, b.ptrType)}, llvm.GO_ABIINTERNAL_CCONV, "")
+}
+
 // createInstruction builds the LLVM IR equivalent instructions for the
 // particular Go SSA instruction.
 func (b *builder) createInstruction(instr *ssa.Value) {
@@ -2219,8 +2239,21 @@ func (b *builder) createInstruction(instr *ssa.Value) {
 	case ssa.OpWBend:
 		// TODO: used to mark UnsafePoint
 	case ssa.OpVarDef:
-	case ssa.OpVarLive, ssa.OpKeepAlive:
-		//
+	case ssa.OpVarLive:
+		n := instr.Aux.(*ir.Name)
+		if !n.Type().HasPointers() {
+			break
+		}
+		addr := b.locals[n]
+		if addr.IsNil() && n.Class == ir.PPARAM {
+			addr = b.getOnStackArg(n)
+		}
+		if addr.IsNil() {
+			b.Fatalf("missing stack slot for VarLive: %v", n)
+		}
+		b.createKeepAlive(addr)
+	case ssa.OpKeepAlive:
+		b.createKeepAlive(b.getValue(instr.Args[0]))
 	case ssa.OpPrefetchCache:
 		// Nop
 		addr := b.getValue(instr.Args[0])
@@ -3160,13 +3193,24 @@ func (b *builder) createExpr(expr *ssa.Value) llvm.Value {
 		from := b.getValue(expr.Args[0])
 		fromType := from.Type()
 		toType := b.getLLVMType(expr.Type)
+		result := b.extendedBitcast(from, toType)
 		if fromType.TypeKind() == llvm.IntegerTypeKind && toType.TypeKind() == llvm.PointerTypeKind {
 			if !from.IsAInstruction().IsNil() {
 				mdid := b.ctx.MDKindID("go.pointerlike")
 				from.SetMetadata(mdid, b.ctx.MDNode(nil))
 			}
+			if !result.IsAInstruction().IsNil() {
+				// Match llvm::GoMetadata::UnsafePoint. Kind 1 marks a region
+				// extending back to the preceding call or function entry.
+				const unsafePoint = 7
+				b.llvmFn.GlobalSetMetadata(b.ctx.MDKindID("go.has.unsafepoint"), b.ctx.MDNode(nil))
+				region := llvm.ConstInt(b.int64Type, 1, false).ConstantAsMetadata()
+				b.CreateIntrinsic(b.goMetadataID, []llvm.Type{result.Type()}, []llvm.Value{
+					result, llvm.ConstInt(b.int64Type, unsafePoint, false), llvm.MetadataAsValue(b.ctx, region),
+				}, "")
+			}
 		}
-		return b.extendedBitcast(from, toType)
+		return result
 	case ssa.OpConstBool:
 		return b.createConst(expr)
 	case ssa.OpConstString:
