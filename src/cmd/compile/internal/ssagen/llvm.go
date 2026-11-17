@@ -1443,26 +1443,18 @@ func (b *builder) createBlock(block *ssa.Block, llvmBlock llvm.BasicBlock) {
 		ret := b.getValue(block.ControlValues()[0])
 		b.createReturnByValue(block, ret)
 	case ssa.BlockRetJmp:
-		// gc doesn't do optimization for tailcall.
 		control := block.ControlValues()[0]
 		if control.Op == ssa.OpSelectN {
 			control = control.Args[0]
 		}
 		if control.Op != ssa.OpTailCall {
-			base.FatalfAt(block.Pos, "must be tail call, got %s", control.Op.String())
+			base.FatalfAt(block.Pos, "must be tail call, got %s", control.Op)
 		}
-		// ignore the last mem arg
-		retType := b.llvmFnType.ReturnType()
-		switch retType.TypeKind() {
-		case llvm.VoidTypeKind:
+		call := b.getValue(control)
+		if call.Type().TypeKind() == llvm.VoidTypeKind {
 			b.CreateRetVoid()
-		default:
-			retVal := b.getValue(control)
-			retVal = b.patchValueType(retVal, retType)
-			if retVal.Type() != retType {
-				base.FatalfAt(block.Pos, "cannot cast %s to %s", retVal.Type().String(), retType.String())
-			}
-			b.CreateRet(retVal)
+		} else {
+			b.CreateRet(call)
 		}
 
 	case ssa.BlockExit:
@@ -1533,6 +1525,33 @@ func (b *builder) curfn() *ir.Func {
 	return b.s.curfn
 }
 
+// tailCallABICompatible checks that the callee can reuse the wrapper's
+// incoming stack area. A promoted pointer receiver changes type, but has
+// the same ABI representation. All other parameters and results must match.
+func tailCallABICompatible(caller, callee *ssa.AuxCall) bool {
+	if callee.Fn.ABI() != obj.ABIInternal {
+		return false
+	}
+	a, b := caller.ABIInfo(), callee.ABIInfo()
+	in, out := a.InParams(), a.OutParams()
+	calleeIn, calleeOut := b.InParams(), b.OutParams()
+	if a.ArgWidth() != b.ArgWidth() || len(in) != len(calleeIn) || len(out) != len(calleeOut) ||
+		len(in) == 0 || !in[0].Type.IsPtr() || !calleeIn[0].Type.IsPtr() {
+		return false
+	}
+	for i := 1; i < len(in); i++ {
+		if !types.Identical(in[i].Type, calleeIn[i].Type) {
+			return false
+		}
+	}
+	for i := range out {
+		if !types.Identical(out[i].Type, calleeOut[i].Type) {
+			return false
+		}
+	}
+	return true
+}
+
 func (b *builder) checkFeasibility() string {
 	curfn := b.curfn()
 
@@ -1591,9 +1610,9 @@ func (b *builder) checkFeasibility() string {
 		for _, instr := range block.Values {
 			switch instr.Op {
 			case ssa.OpTailCall:
-				// GoStatepoints rewrites Go ABI calls into ordinary calls.
-				// A wrapper's tail jump must survive lowering.
-				return "tail call optimization is not enabled for Go ABI internal"
+				if b.state().hasdefer || !tailCallABICompatible(f.OwnAux, instr.Aux.(*ssa.AuxCall)) {
+					return "tail call requires matching Go ABI and no defers"
+				}
 			case ssa.OpConvert:
 				if base.Flag.Cfg.BeastOpt.OPConvert > 0 {
 					from := isNotInHeapTy(instr.Args[0].Type)
@@ -1822,6 +1841,10 @@ func (b *builder) BuildLLVM() {
 		maxargs := int64(-1)
 		for _, b := range b.f.Blocks {
 			for _, v := range b.Values {
+				// A tail jump uses the incoming argument area.
+				if v.Op == ssa.OpTailCall {
+					continue
+				}
 				if _, ok := v.Aux.(*ssa.AuxCall); ok {
 					if maxargs < v.AuxInt {
 						maxargs = v.AuxInt
@@ -2876,6 +2899,14 @@ func (b *builder) createFunctionCall(call *ssa.Value) llvm.Value {
 		cconv = llvm.GO_ABI0_CCONV
 	}
 	goCall := b.makeCall(llvmFnType, callee, args, cconv, "")
+	if call.Op == ssa.OpTailCall {
+		// Preserve the frame boundary so the caller of this wrapper retains
+		// its own continuation and the callee owns the reused argument area.
+		b.inlinable = false
+		goCall.AddCallSiteFnAttribute(b.ctx.CreateEnumAttribute(llvm.AttributeKindID("noinline"), 0))
+		goCall.SetMustTailCall()
+		return goCall
+	}
 	if len(b.s.openDefers) != 0 {
 		// recover must see the deferred function's frame.
 		for _, d := range b.s.openDefers {
