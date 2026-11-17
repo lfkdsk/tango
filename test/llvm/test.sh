@@ -97,6 +97,7 @@ TESTS=(slice quicksort intglobal \
     typecheck \
     machoreloc \
     zerosizestackobj \
+    stackgcmerge \
     goavg64 \
     returnbool \
 )
