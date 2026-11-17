@@ -128,6 +128,8 @@ func funcId2Name(id int) string {
 		return "FUNCDATA_LocalsPointerMaps" // GC info for local variables
 	case abi.FUNCDATA_StackObjects:
 		return "FUNCDATA_StackObjects" // Stack-allocated object metadata
+	case abi.FUNCDATA_OpenCodedDeferInfo:
+		return "FUNCDATA_OpenCodedDeferInfo"
 	case abi.FUNCDATA_InlTree:
 		return "FUNCDATA_InlTree" // Inlining information for debugger
 	}
@@ -831,6 +833,14 @@ func (l *ldPatchContext) PatchFuncData(fsym llvm.TargetSym, fdid int, fdsymbol *
 
 	var tmp [8]loader.Sym
 	data := ldr.EnsureFuncdata(f, tmp[:], fdid)
+	if fdid == abi.FUNCDATA_OpenCodedDeferInfo {
+		// Go may have deduplicated identical defer tables across functions.
+		// Use the normal copy-on-patch path before replacing the frame offsets.
+		l.patchFuncData(f, fdid, data, fdsymbol, func() loader.Sym {
+			panic("missing original open-coded defer table")
+		})
+		return
+	}
 	if fdid == abi.FUNCDATA_StackObjects {
 		if fdsymbol != nil {
 			// Convert R_ADDR relocations to R_ADDROFF for stack objects
