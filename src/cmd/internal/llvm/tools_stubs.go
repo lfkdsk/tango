@@ -17,7 +17,13 @@ func DefaultTools(verbose int) (*Tools, error) {
 
 func (t *Tools) SetDir(dir string) {}
 
-func (t *Tools) RunLTO(archives []string) {}
+func (t *Tools) RunLTO(archives []string) ([]string, error) {
+	return nil, errors.New("TangoLLVM SDK unavailable")
+}
+
+func (t *Tools) RunThinLTO(archives []string, workers, memory int, budget uint) ([]string, error) {
+	return nil, errors.New("TangoLLVM SDK unavailable")
+}
 
 func DefaultLibraryPath() string {
 	return ""

@@ -172,10 +172,14 @@ type CmdFlags struct {
 			AMD64TargetFeature int
 			IntrinsifyMemmove  int
 			FullLTO            int
+			ThinLTO            int
 			OPConvert          int
 		}
 	}
 }
+
+// ThinLTOExport is the summary bitcode to include in the linker archive.
+var ThinLTOExport string
 
 func parseBeastOption(beastStr string) {
 	beastVars := map[string]*int{
@@ -195,6 +199,7 @@ func parseBeastOption(beastStr string) {
 		"loopopt":           &Flag.Cfg.BeastOpt.LoopOpt,
 		"amd64feature":      &Flag.Cfg.BeastOpt.AMD64TargetFeature,
 		"intrinsifymemmove": &Flag.Cfg.BeastOpt.IntrinsifyMemmove,
+		"thin-lto":          &Flag.Cfg.BeastOpt.ThinLTO,
 		"full-lto":          &Flag.Cfg.BeastOpt.FullLTO,
 		"opconvert":         &Flag.Cfg.BeastOpt.OPConvert,
 	}
