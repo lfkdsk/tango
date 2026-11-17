@@ -883,8 +883,12 @@ func (l *ldPatchContext) PatchFuncData(fsym llvm.TargetSym, fdid int, fdsymbol *
 			}
 			l.patchFuncData(f, abi.FUNCDATA_StackObjects, data, fdsymbol, newsym)
 		} else {
-			// Clear stack objects if LLVM didn't generate any
-			l.patchFuncData(f, abi.FUNCDATA_StackObjects, data, nil, nil)
+			// An absent table must have a null FUNCDATA reference. Keeping a
+			// reference to an empty symbol makes generateFuncdata treat it as
+			// live data, even though it cannot allocate space for it.
+			var tmp [8]*goobj.Aux
+			auxs := ldr.DataAuxs(f, goobj.AuxFuncdata, tmp[:])
+			auxs[abi.FUNCDATA_StackObjects].SetSym(goobj.SymRef{})
 		}
 		return
 	}
