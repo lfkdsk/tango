@@ -214,11 +214,13 @@ done
 # Build the FuncPCABI0 fixture as a standard-library package so it can import
 # internal/abi. Overlay the files onto the otherwise empty src/internal.
 fz3temp=$(mktemp -d "${TMPDIR:-/tmp}/tangollvm-fz3.XXXXXX") || exit 1
-goroot=$("$GO_BIN" env GOROOT)
+goroot=$(env -u GOROOT "$GO_BIN" env GOROOT)
 printf '{"Replace":{"%s/src/internal/fz3main.go":"%s/fz3abi/main.go","%s/src/internal/fz3identity_amd64.s":"%s/fz3abi/identity_amd64.s"}}\n' \
     "$goroot" "$DIR" "$goroot" "$DIR" > "$fz3temp/overlay.json"
-if GOEXPERIMENT=tangollvm "$GO_BIN" build -overlay "$fz3temp/overlay.json" \
-    -o "$fz3temp/fz3abi" -gcflags all="$GCFLAGS" -gcflags internal="$GCFLAGS -+" -ldflags=-checklinkname=0 internal \
+# FuncPC's uintptr conversion also needs the existing conversion opt-in.
+fz3flags=${GCFLAGS/-beast=/-beast=opconvert=1,}
+if env -u GOROOT GOEXPERIMENT=tangollvm "$GO_BIN" build -overlay "$fz3temp/overlay.json" \
+    -o "$fz3temp/fz3abi" -gcflags all="$GCFLAGS" -gcflags internal="$fz3flags -+" -ldflags=-checklinkname=0 internal \
     && "$fz3temp/fz3abi"; then
     RESULTS+=("fz3abi ...passed")
 else
