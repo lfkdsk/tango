@@ -6921,6 +6921,11 @@ func EmitArgInfo(f *ir.Func, abiInfo *abi.ABIParamResultInfo) *obj.LSym {
 	// assembly code by name (in this case f is a declaration).
 	// Instead, set it in emitArgInfo above.
 
+	x.WriteBytes(base.Ctxt, 0, encodeArgInfo(f, abiInfo))
+	return x
+}
+
+func encodeArgInfo(f *ir.Func, abiInfo *abi.ABIParamResultInfo) []byte {
 	PtrSize := int64(types.PtrSize)
 	uintptrTyp := types.Types[types.TUINTPTR]
 
@@ -6928,9 +6933,9 @@ func EmitArgInfo(f *ir.Func, abiInfo *abi.ABIParamResultInfo) *obj.LSym {
 		return isStructNotSIMD(t) || t.IsArray() || t.IsComplex() || t.IsInterface() || t.IsString() || t.IsSlice()
 	}
 
-	wOff := 0
+	var data []byte
 	n := 0
-	writebyte := func(o uint8) { wOff = objw.Uint8(x, wOff, o) }
+	writebyte := func(o uint8) { data = append(data, o) }
 
 	// Write one non-aggregate arg/field/element.
 	write1 := func(sz, offset int64) {
@@ -7012,11 +7017,11 @@ func EmitArgInfo(f *ir.Func, abiInfo *abi.ABIParamResultInfo) *obj.LSym {
 		}
 	}
 	writebyte(rtabi.TraceArgsEndSeq)
-	if wOff > rtabi.TraceArgsMaxLen {
+	if len(data) > rtabi.TraceArgsMaxLen {
 		base.Fatalf("ArgInfo too large")
 	}
 
-	return x
+	return data
 }
 
 // for wrapper, emit info of wrapped function.

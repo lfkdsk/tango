@@ -187,7 +187,6 @@ func (p *patcher) Auxs(hostname string) []*TargetSymbol {
 	pclinesym := p.Symbol(hostname + "..pcline")
 	pcinlinesym := p.Symbol(hostname + "..pcinline")
 	pcstackmapindexsym := p.Symbol(hostname + "..pcstackmapindex")
-	// pcargliveindexsym := nil // TOOD: we have not yet implemented pcarglive
 	pcunsafesym := p.Symbol(hostname + "..pcunsafepoint")
 	/*
 		PCDATA_UnsafePoint   = 0
@@ -206,7 +205,51 @@ func (p *patcher) Auxs(hostname string) []*TargetSymbol {
 		pcunsafesym,
 		pcstackmapindexsym,
 		pcinlinesym,
+		p.Symbol(hostname + "..pcargliveindex"),
+		p.Symbol(hostname + "..argliveinfo"),
+		p.Symbol(hostname + "..arginfo"),
 	}
+}
+
+// packArgLivePCData converts resolved (PC, bitmap offset) pairs to Go PCDATA.
+// Multiple labels may resolve to one PC, for example at an empty machine block.
+// In that case only the last state at that PC applies. The final pair gives
+// the end of the function and has no state.
+func packArgLivePCData(raw *TargetSymbol) *TargetSymbol {
+	if len(raw.P) < 16 || len(raw.P)%8 != 0 {
+		panic("invalid LLVM argument liveness PC table")
+	}
+	var data []byte
+	prev := int64(-1)
+	var span uint64
+	var delta int64
+	for off := 0; off+8 < len(raw.P); off += 8 {
+		pc := binary.LittleEndian.Uint32(raw.P[off:])
+		next := binary.LittleEndian.Uint32(raw.P[off+8:])
+		if pc == next {
+			continue
+		}
+		if pc > next {
+			panic("invalid LLVM argument liveness PC range")
+		}
+		value := int64(binary.LittleEndian.Uint32(raw.P[off+4:]))
+		if value != prev {
+			if span != 0 {
+				data = binary.AppendVarint(data, delta)
+				data = binary.AppendUvarint(data, span)
+			}
+			delta = value - prev
+			prev = value
+			span = 0
+		}
+		span += uint64(next - pc)
+	}
+	if span != 0 {
+		data = binary.AppendVarint(data, delta)
+		data = binary.AppendUvarint(data, span)
+	}
+	data = append(data, 0)
+	return &TargetSymbol{HostName: raw.HostName, P: data, Size: uint64(len(data))}
 }
 
 func (p *patcher) patchText(pctxt PatchContext, tsym TargetSym, tsymbol *TargetSymbol) {
@@ -250,7 +293,18 @@ func (p *patcher) patchText(pctxt PatchContext, tsym TargetSym, tsymbol *TargetS
 	pclinesym := p.Symbol(hostname + "..pcline")
 	pcinlinesym := p.Symbol(hostname + "..pcinline")
 	pcstackmapindexsym := p.Symbol(hostname + "..pcstackmapindex")
-	// pcargliveindexsym := nil // TOOD: we have not yet implemented pcarglive
+	arginfo := p.Symbol(hostname + "..arginfo1")
+	arglive := p.Symbol(hostname + "..argliveinfo")
+	pcargliveindexraw := p.Symbol(hostname + "..pcargliveindex")
+	var pcargliveindexsym *TargetSymbol
+	if arglive != nil && pcargliveindexraw != nil {
+		pcargliveindexsym = packArgLivePCData(pcargliveindexraw)
+	} else if arglive != nil || pcargliveindexraw != nil {
+		panic("incomplete LLVM argument liveness metadata")
+	}
+	pctxt.PatchFuncData(tsym, abi.FUNCDATA_ArgInfo, arginfo)
+	pctxt.PatchFuncData(tsym, abi.FUNCDATA_ArgLiveInfo, arglive)
+
 	pcunsafesym := p.Symbol(hostname + "..pcunsafepoint")
 	/*
 		PCDATA_UnsafePoint   = 0
@@ -262,7 +316,7 @@ func (p *patcher) patchText(pctxt PatchContext, tsym TargetSym, tsymbol *TargetS
 		pcunsafesym,
 		pcstackmapindexsym,
 		pcinlinesym,
-		nil, /* pcargliveindexsym, */
+		pcargliveindexsym,
 	}
 	pctxt.PatchPCData(tsym, pcspsym, pcfilesym, pclinesym, pcinlinesym, pcdatasyms)
 }

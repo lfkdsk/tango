@@ -279,9 +279,6 @@ func tte4(n int) string {
 }
 
 func TestTracebackArgs(t *testing.T) {
-	if testenv.IsLLVMEnabled() {
-		t.Skip("TODO: need fix")
-	}
 	if *flagQuick {
 		t.Skip("-quick")
 	}
@@ -445,11 +442,38 @@ func TestTracebackArgs(t *testing.T) {
 			fmt.Sprintf("testTracebackArgsSlice({%p, 0x2, ", &testTracebackArgsSliceBackingStore[0]),
 		},
 	}
+	// LLVM's allocator may keep an argument in a register or use a local
+	// spill. A caller slot is readable only when LLVM proved that a store
+	// wrote the incoming value there. The bytes of a stale slot can vary
+	// with the caller's frame layout, so test the uncertainty marker.
+	llvm := testenv.IsLLVMEnabled()
+	stale := regexp.MustCompile(`0x[0-9a-f]+\?`)
+	llvmArgs := map[string]string{
+		"testTracebackArgs1":   "0x1, 0x2, 0x3, ?, ?)",
+		"testTracebackArgs2":   "?, {0x1, 0x2, 0x3, {0x4, 0x5}}, {}, {0x6, 0x7, 0x8})",
+		"testTracebackArgs3":   "{0x1, 0x2, 0x3}, 0x4, 0x5, ?, {0x7, 0x8, 0x9})",
+		"testTracebackArgs4":   "?, {{{{{...}}}}})",
+		"testTracebackArgs5":   "?, {0x1, {}, {{}, {}}}, {}, {}, {}, {}, {}, ...)",
+		"testTracebackArgs6a":  "0x1, 0x2, 0x3, ?, 0x5, ?, ?, 0x8, ?, 0xa)",
+		"testTracebackArgs6b":  "0x1, 0x2, 0x3, ?, 0x5, ?, ?, 0x8, ?, 0xa, ...)",
+		"testTracebackArgs9":   "0x1, ?, ?, ?, {0x5, 0x6}, ?)",
+		"testTracebackArgs10":  "?, ?, ?, ?, ?)",
+		"testTracebackArgs11a": "?, ?, ?)",
+		"testTracebackArgs11b": "?, ?, ?, ?)",
+	}
 	for _, test := range tests {
 		n := test.fn()
 		got := testTracebackArgsBuf[:n]
-		if !bytes.Contains(got, []byte(test.expect)) {
-			t.Errorf("traceback does not contain expected string: want %q, got\n%s", test.expect, got)
+		want := test.expect
+		if llvm {
+			name, _, _ := strings.Cut(want, "(")
+			if args, ok := llvmArgs[name]; ok {
+				want = name + "(" + args
+			}
+			got = stale.ReplaceAllLiteral(got, []byte("?"))
+		}
+		if !bytes.Contains(got, []byte(want)) {
+			t.Errorf("traceback does not contain expected string: want %q, got\n%s", want, testTracebackArgsBuf[:n])
 		}
 	}
 }

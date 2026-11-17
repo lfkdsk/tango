@@ -1818,6 +1818,10 @@ func (b *builder) BuildLLVM() {
 
 		// create argmap area
 		abiInfo := b.f.OwnAux.ABIInfo()
+		if b.curfn().Type().NumRecvs() != 0 || b.curfn().Type().NumParams() != 0 {
+			b.llvmFn.GlobalSetMetadata(b.ctx.MDKindID("go.arginfo"),
+				b.ctx.MDNode([]llvm.Metadata{b.ctx.MDString(string(encodeArgInfo(b.curfn(), abiInfo)))}))
+		}
 		if abiInfo.ArgWidth() != 0 {
 			mdid := b.ctx.MDKindID("go.caller.args.area")
 			mdsize := llvm.ConstInt(b.int64Type, uint64(types.RoundUp(abiInfo.ArgWidth(), int64(types.RegSize))), false).ConstantAsMetadata()
