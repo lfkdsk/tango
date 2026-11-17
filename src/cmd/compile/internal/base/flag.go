@@ -215,6 +215,9 @@ func parseBeastOption(beastStr string) {
 		Flag.Cfg.BeastOpt.OPConvert = 0
 	}
 	for oname, val := range flag_beast.ParseBeastArguments(beastStr) {
+		if oname == "thin-import-budget" || oname == "thin-memory-mb" {
+			continue // cmd/go forwards these options to the linker.
+		}
 		if opt, ok := beastVars[oname]; ok {
 			*opt = val
 		} else {
