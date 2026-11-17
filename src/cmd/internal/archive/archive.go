@@ -64,6 +64,9 @@ type Entry struct {
 	Obj *GoObj // nil if this entry is not a Go object file
 }
 
+// ThinLTOEntry names the optional TangoLLVM summary bitcode member.
+const ThinLTOEntry = "__.THINLTO"
+
 type EntryType int
 
 const (

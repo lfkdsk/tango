@@ -123,6 +123,11 @@ var (
 	flagRandLayout    = flag.Int64("randlayout", 0, "randomize function layout")
 	flagAllErrors     = flag.Bool("e", false, "no limit on number of errors reported")
 	flagBeast         = flag.Bool("enablebeast", false, "enable beast mode")
+	flagThinLTO       = flag.Bool("thin-lto", false, "enable TangoLLVM thin link-time optimization")
+	flagLTOOnly       = flag.String("ltoonly", "", "file listing dependency import paths eligible for TangoLLVM LTO (one per line)")
+	flagLTOWorkers    = flag.Int("maxparallel", min(8, runtime.GOMAXPROCS(0)), "maximum concurrent TangoLLVM backends")
+	flagThinBudget    = flag.Uint("thin-import-budget", 2000, "ThinLTO import instruction budget per module")
+	flagThinMemory    = flag.Int("thin-memory-mb", 4096, "ThinLTO worker admission budget in MiB")
 	flagFullLTO       = flag.Bool("full-lto", false, "enable TangoLLVM full link-time optimization")
 
 	cpuprofile        = flag.String("cpuprofile", "", "write cpu profile to `file`")
@@ -379,18 +384,44 @@ func Main(arch *sys.Arch, theArch Arch) {
 	default:
 		addlibpath(ctxt, "command line", "command line", flag.Arg(0), "main", "", zerofp)
 	}
-	if buildcfg.Experiment.TangoLLVM && *flagFullLTO {
+	if buildcfg.Experiment.TangoLLVM && (*flagFullLTO || *flagThinLTO) {
+		if *flagFullLTO && *flagThinLTO {
+			Exitf("-full-lto and -thin-lto are mutually exclusive")
+		}
+		if *flagLTOWorkers < 1 || *flagThinMemory < 1 || *flagThinBudget > uint(^uint32(0)) {
+			Exitf("invalid TangoLLVM backend limits")
+		}
 		bench.Start("build-lto")
 		tools, err := llvm.DefaultTools(ctxt.Debugvlog)
 		if err != nil {
 			Exitf("initialize TangoLLVM tools: %v", err)
 		}
 		tools.SetDir(filepath.Dir(*flagOutfile))
-		archives := []string{flag.Arg(0)}
-		for _, archive := range ctxt.PackageFile {
-			archives = append(archives, archive)
+		var eligible map[string]bool
+		if *flagLTOOnly != "" {
+			data, err := os.ReadFile(*flagLTOOnly)
+			if err != nil {
+				Exitf("read -ltoonly: %v", err)
+			}
+			eligible = make(map[string]bool)
+			for _, pkg := range strings.Fields(string(data)) {
+				eligible[pkg] = true
+			}
 		}
-		tools.RunLTO(archives)
+		archives := []string{flag.Arg(0)}
+		for pkg, archive := range ctxt.PackageFile {
+			if eligible == nil || eligible[pkg] {
+				archives = append(archives, archive)
+			}
+		}
+		if *flagThinLTO {
+			ctxt.llvmLTOObjects, err = tools.RunThinLTO(archives, *flagLTOWorkers, *flagThinMemory, *flagThinBudget)
+		} else {
+			ctxt.llvmLTOObjects, err = tools.RunLTO(archives)
+		}
+		if err != nil {
+			Exitf("TangoLLVM LTO: %v", err)
+		}
 	}
 	bench.Start("loadlib")
 	ctxt.loadlib()
