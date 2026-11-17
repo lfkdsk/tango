@@ -244,6 +244,9 @@ func (p *patcher) patchText(pctxt PatchContext, tsym TargetSym, tsymbol *TargetS
 	pctxt.PatchFuncData(tsym, abi.FUNCDATA_StackObjects, stkobjsym)
 	pctxt.PatchFuncData(tsym, abi.FUNCDATA_ArgsPointerMaps, argsmapsym)
 	pctxt.PatchFuncData(tsym, abi.FUNCDATA_LocalsPointerMaps, localsmapsym)
+	if deferInfo := p.Symbol(hostname + "..opendefer"); deferInfo != nil {
+		pctxt.PatchFuncData(tsym, abi.FUNCDATA_OpenCodedDeferInfo, deferInfo)
+	}
 
 	pcspsym := p.Symbol(hostname + "..pcsp")
 	pcfilesym := p.Symbol(hostname + "..pcfile")

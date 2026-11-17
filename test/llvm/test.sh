@@ -102,6 +102,8 @@ TESTS=(slice quicksort intglobal \
     stackgcmerge \
     goavg64 \
     returnbool \
+    packageinit \
+    opendefergc \
 )
 
 DIRTESTS=(linkname abi)
@@ -163,7 +165,7 @@ do
         continue
     fi
 
-    if [[ "$T" == "unsafeconvert_keepalive" ]]; then
+    if [[ $T == unsafeconvert_keepalive || $T == opendefergc ]]; then
         GODEBUG=gccheckmark=1 GOGC=1 "$TBIN_PATH"
     else
         "$TBIN_PATH"
