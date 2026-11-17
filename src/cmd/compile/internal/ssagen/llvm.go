@@ -487,6 +487,14 @@ func (c *compilerContext) complete() {
 		m := c.mod
 		m = eraseDupOk(m, c.dupokFunc)
 		c.writeLLVMModule("export", m)
+		if base.Flag.Cfg.BeastOpt.ThinLTO == 1 {
+			summary := c.bcfile + ".thin"
+			if err := tools.RunShell("opt", "-passes=thinlto-pre-link<O3>",
+				"-go-specialization=false", "-module-summary", "-o", summary, c.bcfile); err != nil {
+				log.Fatal("ThinLTO summary: ", err)
+			}
+			base.ThinLTOExport = summary
+		}
 	}
 	// run opt | llc
 	objfile, err := tools.CompileModule(c.bcfile, c.Triple, c.Features, erase, optArgs, args)
