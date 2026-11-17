@@ -100,6 +100,7 @@ TESTS=(slice quicksort intglobal \
     stackgcmerge \
     goavg64 \
     returnbool \
+    rodatamat
 )
 
 DIRTESTS=(linkname abi)
