@@ -1605,6 +1605,17 @@ func (b *Builder) printLinkerConfig(h io.Writer, p *load.Package) {
 		fmt.Fprintf(h, "link %s %q %s\n", b.toolID("link"), forcedLdflags, ldBuildmode)
 		if p != nil {
 			fmt.Fprintf(h, "linkflags %q\n", p.Internal.Ldflags)
+			if buildcfg.Experiment.TangoLLVM {
+				for i, arg := range p.Internal.Ldflags {
+					path, hasValue := strings.CutPrefix(arg, "-ltoonly=")
+					if arg == "-ltoonly" && i+1 < len(p.Internal.Ldflags) {
+						path, hasValue = p.Internal.Ldflags[i+1], true
+					}
+					if hasValue && path != "" {
+						fmt.Fprintf(h, "ltoonly %s\n", b.fileHash(path))
+					}
+				}
+			}
 		}
 
 		// GOARM, GOMIPS, etc.
