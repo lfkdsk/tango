@@ -99,6 +99,8 @@ TESTS=(slice quicksort intglobal \
     zerosizestackobj \
     goavg64 \
     returnbool \
+    packageinit \
+    opendefergc \
 )
 
 DIRTESTS=(linkname abi)
@@ -155,7 +157,11 @@ do
         continue
     fi
 
-    "$TBIN_PATH"
+    if [[ $T == opendefergc ]]; then
+        GODEBUG=gccheckmark=1 GOGC=1 "$TBIN_PATH"
+    else
+        "$TBIN_PATH"
+    fi
     if (( $? != 0 )); then
         echo "Failed to run test $T"
         RESULTS+=("$T ...FAILED")

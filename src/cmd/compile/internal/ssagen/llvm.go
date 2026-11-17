@@ -1531,10 +1531,6 @@ func (b *builder) checkFeasibility() string {
 		return "package denylisted"
 	}
 
-	if strings.HasSuffix(b.s.f.Name, "init") {
-		return "TODO: ignore init"
-	}
-
 	if curfn.ABIWrapper() {
 		return "no ABI wrapper"
 	}
@@ -1567,8 +1563,8 @@ func (b *builder) checkFeasibility() string {
 	}
 
 	f := b.state().f
-	if b.state().hasdefer || b.state().hasOpenDefers {
-		return "TODO: Defer"
+	if b.state().hasdefer && len(b.state().openDefers) == 0 {
+		return "defer requires runtime registration"
 	}
 
 	isNotInHeapTy := func(t *types.Type) bool {
@@ -1586,8 +1582,15 @@ func (b *builder) checkFeasibility() string {
 				// see intrinsics.go
 				return "TODO: amd64 intrinsics is not supported yet"
 			case ssa.OpTailCall:
+				// GoStatepoints rewrites Go ABI calls into ordinary calls.
+				// A wrapper's tail jump must survive lowering.
 				return "tail call optimization is not enabled for Go ABI internal"
-			case ssa.OpKeepAlive, ssa.OpVarLive:
+			case ssa.OpVarLive:
+				n := instr.Aux.(*ir.Name)
+				if !n.OpenDeferSlot() && n != b.state().deferBitsTemp {
+					return "TODO: KeepAlive or VarLive"
+				}
+			case ssa.OpKeepAlive:
 				return "TODO: KeepAlive or VarLive"
 			case ssa.OpConvert:
 				if base.Flag.Cfg.BeastOpt.OPConvert > 0 {
@@ -1635,6 +1638,104 @@ func (b *builder) checkFeasibility() string {
 	}
 
 	return ""
+}
+
+// deferFrameSlot reports whether the panic unwinder can access this stack slot.
+func (b *builder) deferFrameSlot(n *ir.Name) bool {
+	return len(b.s.openDefers) != 0 &&
+		(n == b.s.deferBitsTemp || n.OpenDeferSlot() || n.Class == ir.PPARAMOUT)
+}
+
+func (b *builder) deferFrameAddress(v *ssa.Value) bool {
+	for v.Op == ssa.OpOffPtr {
+		v = v.Args[0]
+	}
+	return v.Op == ssa.OpLocalAddr && b.deferFrameSlot(v.Aux.(*ir.Name))
+}
+
+// Open defer metadata uses the IDs declared in llvm/TangoLLVM/TangoLLVM.h.
+// The intrinsic keeps the allocation and its metadata together across IR passes.
+func (b *builder) emitLLVMOpenDefers() {
+	const (
+		openDeferReturn = iota
+		openDefer
+		alwaysLive
+	)
+	metadata := func(v int64) llvm.Metadata {
+		return llvm.ConstInt(b.int64Type, uint64(v), false).ConstantAsMetadata()
+	}
+	mark := func(addr llvm.Value, kind uint64, value llvm.Metadata) {
+		b.CreateIntrinsic(llvm.LookupIntrinsicID("llvm.go.metadata"), []llvm.Type{addr.Type()},
+			[]llvm.Value{addr, llvm.ConstInt(b.int64Type, kind, false), llvm.MetadataAsValue(b.ctx, value)}, "")
+	}
+	keepLive := func(n *ir.Name) {
+		addr := b.locals[n]
+		if !addr.IsAAllocaInst().IsNil() && n.Type().HasPointers() {
+			b.CreateStore(b.getZeroValueConst(b.getLLVMType(n.Type())), addr).SetVolatile(true)
+		}
+		mark(addr, alwaysLive, b.ctx.MDNode(nil))
+	}
+
+	b.inlinable = false
+	b.llvmFn.GlobalSetMetadata(b.ctx.MDKindID("go.opendefer"),
+		b.ctx.MDNode([]llvm.Metadata{metadata(int64(len(b.s.openDefers)))}))
+	mark(b.locals[b.s.deferBitsTemp], openDefer, metadata(-1))
+	for i, d := range b.s.openDefers {
+		keepLive(d.closureNode)
+		mark(b.locals[d.closureNode], openDefer, metadata(int64(i)))
+	}
+
+	var returns []llvm.Metadata
+	for i, p := range b.f.OwnAux.ABIInfo().OutParams() {
+		n := p.Name
+		if n.Type().Size() == 0 {
+			continue
+		}
+		keepLive(n)
+		if len(p.Registers) == 0 {
+			continue
+		}
+		index := metadata(int64(i))
+		mark(b.locals[n], openDeferReturn, index)
+		parts, offsets := p.RegisterTypesAndOffsets()
+		for j, part := range parts {
+			op, reg := ssa.ArgOpAndRegisterFor(p.Registers[j], b.f.ABISelf)
+			reg++
+			if op == ssa.OpArgFloatReg {
+				reg = -reg
+			}
+			returns = append(returns, metadata(reg), index, metadata(offsets[j]), metadata(part.Size()))
+		}
+	}
+	if len(returns) != 0 {
+		b.llvmFn.GlobalSetMetadata(b.ctx.MDKindID("go.opendefer.return"), b.ctx.MDNode(returns))
+	}
+}
+
+// addOpenDeferRecoveryEdge prevents LLVM from inferring noreturn for a
+// function that recovers via an epilogue inserted after IR optimization.
+// The initialized defer byte makes the synthetic edge unreachable at run time.
+func (b *builder) addOpenDeferRecoveryEdge(entry llvm.BasicBlock) {
+	body := b.ctx.AddBasicBlock(b.llvmFn, "defer.body")
+	body.MoveAfter(entry)
+	b.blocks[b.f.Entry] = body
+	recovery := b.ctx.AddBasicBlock(b.llvmFn, "defer.recovery")
+
+	bits := b.locals[b.s.deferBitsTemp]
+	zero := llvm.ConstNull(b.int8Type)
+	b.CreateStore(zero, bits).SetVolatile(true)
+	active := b.CreateLoad(b.int8Type, bits, "")
+	active.SetVolatile(true)
+	b.CreateCondBr(b.CreateICmp(llvm.IntEQ, active, zero, ""), body, recovery)
+
+	b.SetInsertPointAtEnd(recovery)
+	retType := b.llvmFnType.ReturnType()
+	ret := b.CreateIntrinsic(llvm.LookupIntrinsicID("llvm.go.panicreturn"), []llvm.Type{retType}, nil, "")
+	if retType.TypeKind() == llvm.VoidTypeKind {
+		b.CreateRetVoid()
+	} else {
+		b.CreateRet(ret)
+	}
 }
 
 // checked FrameOffset
@@ -1721,7 +1822,8 @@ func (b *builder) BuildLLVM() {
 		b.blocks[block] = llvmBlock
 	}
 
-	// create entry block so that we can create alloca.
+	// Keep allocas in the physical entry block. Open defers also need
+	// an IR edge representing return through the recovery epilogue.
 	entryLLVMBlock := b.blocks[b.f.Entry]
 	b.SetInsertPointAtEnd(entryLLVMBlock)
 	{
@@ -1774,6 +1876,10 @@ func (b *builder) BuildLLVM() {
 				b.addStackObjectGCData(n, a)
 				b.locals[n] = a
 			}
+		}
+
+		if len(b.s.openDefers) != 0 {
+			b.emitLLVMOpenDefers()
 		}
 
 		{
@@ -1879,8 +1985,10 @@ func (b *builder) BuildLLVM() {
 		}
 	}
 
-	// create block
-	b.createBlock(b.f.Entry, entryLLVMBlock)
+	if len(b.s.openDefers) != 0 {
+		b.addOpenDeferRecoveryEdge(entryLLVMBlock)
+	}
+	b.createBlock(b.f.Entry, b.blocks[b.f.Entry])
 
 	for i := len(postorder) - 2; i >= 0; i-- {
 		block := postorder[i]
@@ -2176,7 +2284,7 @@ func (b *builder) createInstruction(instr *ssa.Value) {
 		addr := b.getValue(instr.Args[0])
 		val := b.getValue(instr.Args[1])
 		addr = b.toPtr(addr, llvm.PointerType(val.Type(), 0))
-		b.CreateStore(val, addr)
+		b.CreateStore(val, addr).SetVolatile(b.deferFrameAddress(instr.Args[0]))
 	case ssa.OpMove:
 		dstptr := b.getValue(instr.Args[0])
 		srcptr := b.getValue(instr.Args[1])
@@ -2189,7 +2297,10 @@ func (b *builder) createInstruction(instr *ssa.Value) {
 		}
 		size := llvm.ConstInt(b.int64Type, uint64(instr.AuxInt), false)
 		align := int(auxt.Alignment())
-		b.CreateMemCpyInline(dstptr, align, srcptr, align, size)
+		copy := b.CreateMemCpyInline(dstptr, align, srcptr, align, size)
+		if b.deferFrameAddress(instr.Args[0]) || b.deferFrameAddress(instr.Args[1]) {
+			copy.SetOperand(3, llvm.ConstInt(b.int1Type, 1, false))
+		}
 	case ssa.OpZero:
 		ptr := b.getValue(instr.Args[0])
 		if ptr.Type() != b.i8ptrType {
@@ -2199,7 +2310,10 @@ func (b *builder) createInstruction(instr *ssa.Value) {
 		size := llvm.ConstInt(b.int64Type, uint64(instr.AuxInt), false)
 		val := llvm.ConstInt(b.int8Type, 0, false)
 		align := int(auxt.Alignment())
-		b.CreateMemSet(ptr, val, size, align)
+		zero := b.CreateMemSet(ptr, val, size, align)
+		if b.deferFrameAddress(instr.Args[0]) {
+			zero.SetOperand(3, llvm.ConstInt(b.int1Type, 1, false))
+		}
 	case ssa.OpPanicBounds:
 		kind := instr.AuxInt
 		sym := BoundsCheckFunc[kind]
@@ -2716,6 +2830,16 @@ func (b *builder) createFunctionCall(call *ssa.Value) llvm.Value {
 		cconv = llvm.GO_ABI0_CCONV
 	}
 	goCall := b.makeCall(llvmFnType, callee, args, cconv, "")
+	if len(b.s.openDefers) != 0 {
+		// recover must see the deferred function's frame.
+		for _, d := range b.s.openDefers {
+			if d.closure != nil && call.Op == ssa.OpClosureCall ||
+				d.closure == nil && call.Op == ssa.OpStaticCall && aux.Fn == d.n.Fun.(*ir.Name).Linksym() {
+				goCall.AddCallSiteFnAttribute(b.ctx.CreateEnumAttribute(llvm.AttributeKindID("noinline"), 0))
+				break
+			}
+		}
+	}
 	if !closure.IsNil() {
 		goCall.AddCallSiteFnAttribute(b.ctx.CreateStringAttribute("go.closurecall", ""))
 	}
@@ -3230,7 +3354,9 @@ func (b *builder) createExpr(expr *ssa.Value) llvm.Value {
 		if t != vt {
 			addr = b.toPtr(addr, vt)
 		}
-		return b.CreateLoad(llvmTy, addr, "")
+		load := b.CreateLoad(llvmTy, addr, "")
+		load.SetVolatile(b.deferFrameAddress(expr.Args[0]))
+		return load
 	case ssa.OpDereference:
 		// OpDereference is the same as load and
 		// has been rewritten to load in function expandCalls.
@@ -4483,11 +4609,7 @@ func (b *builder) addStackObjectGCData(n *ir.Name, v llvm.Value) {
 }
 
 func (b *builder) getLLVMEntryBlock() llvm.BasicBlock {
-	entryLLVMBlock := b.blocks[b.f.Entry]
-	if entryLLVMBlock != b.llvmFn.FirstBasicBlock() {
-		panic("must be the first basic block")
-	}
-	return entryLLVMBlock
+	return b.llvmFn.FirstBasicBlock()
 }
 
 func (b *builder) createGoPreAllocated(t llvm.Type, args ...llvm.Value) llvm.Value {

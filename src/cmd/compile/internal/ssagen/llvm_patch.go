@@ -142,6 +142,8 @@ func (c *gcPatchCtxt) PatchFuncData(fsym llvm.TargetSym, fdid int, fdsymbol *llv
 	f := toLSym(fsym)
 	fninfo := f.Func()
 	switch fdid {
+	case abi.FUNCDATA_OpenCodedDeferInfo:
+		patchSymbol(fninfo.OpenCodedDeferInfo, fdsymbol)
 	case abi.FUNCDATA_StackObjects:
 		if fdsymbol == nil {
 			fninfo.StackObjects = nil
