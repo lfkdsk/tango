@@ -649,8 +649,20 @@ func (gcToolchain) ld(b *Builder, root *Action, targetPath, importcfg, mainpkg s
 	// enabled at runtime can read it.
 	if beastStr := flag_beast.GetBeastFlag(root.Package.Internal.Gcflags); beastStr != "" {
 		ldflags = append(ldflags, "-X=runtime.beastFlag="+beastStr)
-		if buildcfg.Experiment.TangoLLVM && flag_beast.ParseBeastArguments(beastStr)["full-lto"] == 1 {
-			ldflags = append(ldflags, "-full-lto")
+		if buildcfg.Experiment.TangoLLVM {
+			options := flag_beast.ParseBeastArguments(flag_beast.GetBeastStr(root.Package.Internal.Gcflags))
+			for _, mode := range []string{"full-lto", "thin-lto"} {
+				if options[mode] == 1 {
+					ldflags = append(ldflags, "-"+mode)
+				}
+			}
+			if options["thin-lto"] == 1 {
+				for _, name := range []string{"thin-import-budget", "thin-memory-mb"} {
+					if value, ok := options[name]; ok {
+						ldflags = append(ldflags, fmt.Sprintf("-%s=%d", name, value))
+					}
+				}
+			}
 		}
 	}
 	ldflags, err := setextld(ldflags, compiler)

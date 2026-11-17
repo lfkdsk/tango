@@ -12,7 +12,9 @@ import (
 	"encoding/binary"
 	"fmt"
 	"internal/abi"
+	"iter"
 	"log"
+	"maps"
 	"strings"
 )
 
@@ -43,6 +45,7 @@ type TargetReloc struct {
 }
 
 type Patcher interface {
+	SymbolNames() iter.Seq[string]
 	Symbol(name string) *TargetSymbol
 	EnsureSymbol(name string) *TargetSymbol
 	Auxs(name string) []*TargetSymbol
@@ -151,6 +154,8 @@ func extractPatchSymbols(ctxt PatchContext, data []byte) map[string]*TargetSymbo
 	log.Fatalf("unsupported file format: magic=%x", magic)
 	return nil
 }
+
+func (p *patcher) SymbolNames() iter.Seq[string] { return maps.Keys(p.symbols) }
 
 func (p *patcher) Symbol(name string) *TargetSymbol {
 	if sym, ok := p.symbols[name]; ok {

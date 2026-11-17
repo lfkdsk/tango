@@ -20,6 +20,8 @@ import (
 	"cmd/internal/objabi"
 	"encoding/json"
 	"fmt"
+	"io"
+	"os"
 	"strings"
 )
 
@@ -69,6 +71,19 @@ func dumpobj1(outfile string, mode int) {
 		start := startArchiveEntry(bout)
 		dumpLinkerObj(bout)
 		finishArchiveEntry(bout, start, "_go_.o")
+		if path := base.ThinLTOExport; path != "" {
+			input, err := os.Open(path)
+			if err != nil {
+				base.Fatalf("open ThinLTO summary: %v", err)
+			}
+			start := startArchiveEntry(bout)
+			_, err = io.Copy(bout, input)
+			input.Close()
+			if err != nil {
+				base.Fatalf("write ThinLTO summary: %v", err)
+			}
+			finishArchiveEntry(bout, start, archive.ThinLTOEntry)
+		}
 	}
 
 	if err := bout.Close(); err != nil {

@@ -96,8 +96,9 @@ type Link struct {
 	Textp        []loader.Sym
 	Moduledata   loader.Sym
 
-	PackageFile  map[string]string
-	PackageShlib map[string]string
+	PackageFile    map[string]string
+	llvmLTOObjects []string
+	PackageShlib   map[string]string
 
 	tramps []loader.Sym // trampolines
 
