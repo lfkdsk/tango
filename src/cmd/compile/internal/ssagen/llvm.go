@@ -260,6 +260,7 @@ func InitLLVM() {
 	// We should remove these lookup once we have unified the rules of LLVM and the gc compiler
 	typecheck.LookupRuntimeABI("morestack", obj.ABI0)
 	typecheck.LookupRuntimeABI("morestack_noctxt", obj.ABI0)
+	typecheck.LookupRuntimeABI("morestackc", obj.ABI0)
 	typecheck.LookupRuntimeFunc("memclrNoHeapPointers")
 	typecheck.LookupRuntimeFunc("memmove")
 
@@ -1231,9 +1232,8 @@ func (c *compilerContext) makeLLVMType(typ *types.Type) llvm.Type {
 		if typ.IsVoid() {
 			return c.ctx.VoidType()
 		}
-		// TypeInt128.
 		if typ == types.TypeInt128 {
-			return c.ctx.StructType([]llvm.Type{c.int64Type, c.int64Type}, false)
+			return llvm.VectorType(c.int8Type, 16)
 		}
 		shouldNotReachHere()
 		return llvm.Type{}
@@ -1287,7 +1287,10 @@ func (b *builder) createFunctionStart() {
 	if !curfn.LSym.NoSplit() {
 		// we may split the stack
 		var symbol = "runtime.morestack"
-		if !curfn.LSym.NeedCtxt() {
+		if curfn.LSym.CFunc() {
+			symbol = "runtime.morestackc"
+			b.llvmFn.AddFunctionAttr(b.ctx.CreateStringAttribute("go-cfunc", "true"))
+		} else if !curfn.LSym.NeedCtxt() {
 			symbol = "runtime.morestack_noctxt"
 		}
 		// see splitstack in obj6.go
@@ -1542,11 +1545,6 @@ func (b *builder) checkFeasibility() string {
 		return "must be ABI internal"
 	}
 
-	if curfn.LSym.CFunc() {
-		// see obj6.go: stacksplit
-		return "TODO: CFunc has different stack guard offset"
-	}
-
 	if curfn.LSym.Func().FuncID != 0 /* internal/abi.FuncIDNormal */ {
 		return "TODO: be conservative about non-normal functions"
 	}
@@ -1582,9 +1580,6 @@ func (b *builder) checkFeasibility() string {
 	for _, block := range f.Blocks {
 		for _, instr := range block.Values {
 			switch instr.Op {
-			case ssa.OpAMD64MOVQi2f:
-				// see intrinsics.go
-				return "TODO: amd64 intrinsics is not supported yet"
 			case ssa.OpTailCall:
 				return "tail call optimization is not enabled for Go ABI internal"
 			case ssa.OpKeepAlive, ssa.OpVarLive:
@@ -1599,8 +1594,6 @@ func (b *builder) checkFeasibility() string {
 				} else {
 					return "TODO: unsafe convert is not guaranteed"
 				}
-			case ssa.OpFloor, ssa.OpFMA, ssa.OpTrunc, ssa.OpCeil:
-				return "TODO: libm is not supported"
 			}
 			if aux, ok := instr.Aux.(*ssa.AuxCall); ok {
 				if aux.Fn != nil {
@@ -1614,20 +1607,8 @@ func (b *builder) checkFeasibility() string {
 				continue
 			}
 			if aux, ok := instr.Aux.(*obj.LSym); ok {
-				if aux.Type == objabi.STEXT && (aux.ABIWrapper() || aux.ABI() != obj.ABIInternal) {
+				if aux.Type == objabi.STEXT && !aux.FuncPCABI0() && (aux.ABIWrapper() || aux.ABI() != obj.ABIInternal) {
 					return "no ABI wrapper or ABI0"
-				}
-				if aux.ABI() != obj.ABIInternal {
-					// workaround
-					// TODO: a rare case:
-					// 1). A function is defined in assembly and has ABI0
-					// 2). The ABI0 is used by abi.FuncPCABI0 so the sym is created by direct lookup
-					// See getGoFunctionLVMName. We could use a unified naming schema for all symbols.
-					sym := base.Ctxt.LookupLLVMGoSymbolABI(aux.Name, obj.ABIInternal)
-					// If a named symbol has an ABI internal symbol, then the symbol must point to a function.
-					if sym != nil {
-						return "oops, an assembly function's direct address is used via abi.FuncPCABI0"
-					}
 				}
 				continue
 			}
@@ -2345,6 +2326,32 @@ func (b *builder) patchValueType(fromVal llvm.Value, toType llvm.Type) llvm.Valu
 		}
 	}
 	return fromVal
+}
+
+func (b *builder) mapControlVectorType() llvm.Type {
+	return llvm.VectorType(b.int8Type, 16)
+}
+
+func (b *builder) shuffleMapControl(expr *ssa.Value, indices []int) llvm.Value {
+	mask := llvm.Undef(llvm.VectorType(b.int32Type, len(indices)))
+	for i, index := range indices {
+		mask = b.CreateInsertElement(mask, llvm.ConstInt(b.int32Type, uint64(index), false), llvm.ConstInt(b.int32Type, uint64(i), false), "")
+	}
+	args := b.getArgs(expr)
+	right := llvm.Undef(b.mapControlVectorType())
+	if len(args) == 2 {
+		right = args[1]
+	}
+	return b.CreateShuffleVector(args[0], right, mask, "")
+}
+
+// LLVM legalizes unsupported scalar math intrinsics to C ABI calls.
+// A Go call keeps the software path available in pure Go binaries.
+func (b *builder) createLibmOp(expr *ssa.Value, name, feature string) llvm.Value {
+	if !strings.Contains(","+b.Config.Features+",", ",+"+feature+",") {
+		return b.createGoCall(base.PkgLinksym("math", name, obj.ABIInternal), expr)
+	}
+	return b.createIntrinsicCallWithArgs("llvm."+strings.ToLower(name)+".f64", b.getArgs(expr), b.f64Type)
 }
 
 func (b *builder) createGoCall(sym *obj.LSym, expr *ssa.Value) llvm.Value {
@@ -3120,12 +3127,47 @@ func (b *builder) createExpr(expr *ssa.Value) llvm.Value {
 		return b.createIntrinsicCallWithArgs("llvm.sqrt.f64", b.getArgs(expr), b.f64Type)
 	case ssa.OpSqrt32:
 		return b.createIntrinsicCallWithArgs("llvm.sqrt.f32", b.getArgs(expr), b.f32Type)
+	case ssa.OpAMD64MOVQi2f:
+		// MOVQ from a GP register clears the high 64 bits of the XMM register.
+		return b.CreateBitCast(b.CreateZExt(b.getArgs(expr)[0], b.ctx.IntType(128), ""), b.mapControlVectorType(), "")
+	case ssa.OpAMD64VPBROADCASTB, ssa.OpAMD64PSHUFBbroadcast:
+		x := b.getArgs(expr)[0]
+		t := b.mapControlVectorType()
+		if expr.Op == ssa.OpAMD64VPBROADCASTB {
+			x = b.CreateTrunc(x, b.int8Type, "")
+			x = b.CreateInsertElement(llvm.Undef(t), x, llvm.ConstInt(b.int32Type, 0, false), "")
+		}
+		mask := llvm.ConstNull(llvm.VectorType(b.int32Type, 16))
+		return b.CreateShuffleVector(x, llvm.Undef(t), mask, "")
+	case ssa.OpAMD64PUNPCKLBW:
+		return b.shuffleMapControl(expr, []int{0, 16, 1, 17, 2, 18, 3, 19, 4, 20, 5, 21, 6, 22, 7, 23})
+	case ssa.OpAMD64PSHUFLW:
+		mask := make([]int, 16)
+		for i := 0; i < 8; i++ {
+			mask[i] = 2*int(expr.AuxInt>>uint(2*(i/2))&3) + i%2
+			mask[i+8] = i + 8
+		}
+		return b.shuffleMapControl(expr, mask)
+	case ssa.OpAMD64PCMPEQB:
+		args := b.getArgs(expr)
+		eq := b.CreateICmp(llvm.IntEQ, args[0], args[1], "")
+		return b.CreateSExt(eq, b.mapControlVectorType(), "")
+	case ssa.OpAMD64PSIGNB:
+		args := b.getArgs(expr)
+		zero := llvm.ConstNull(b.mapControlVectorType())
+		negative := b.CreateICmp(llvm.IntSLT, args[1], zero, "")
+		nonzero := b.CreateICmp(llvm.IntNE, args[1], zero, "")
+		signed := b.CreateSelect(negative, b.CreateSub(zero, args[0], ""), args[0], "")
+		return b.CreateSelect(nonzero, signed, zero, "")
+	case ssa.OpAMD64PMOVMSKB:
+		mask := b.createIntrinsicCallWithArgs("llvm.x86.sse2.pmovmskb.128", b.getArgs(expr), b.int32Type)
+		return b.CreateTrunc(mask, b.getLLVMType(expr.Type), "")
 	case ssa.OpFloor:
-		return b.createIntrinsicCallWithArgs("llvm.floor.f64", b.getArgs(expr), b.f64Type)
+		return b.createLibmOp(expr, "Floor", "sse4.1")
 	case ssa.OpCeil:
-		return b.createIntrinsicCallWithArgs("llvm.ceil.f64", b.getArgs(expr), b.f64Type)
+		return b.createLibmOp(expr, "Ceil", "sse4.1")
 	case ssa.OpTrunc:
-		return b.createIntrinsicCallWithArgs("llvm.trunc.f64", b.getArgs(expr), b.f64Type)
+		return b.createLibmOp(expr, "Trunc", "sse4.1")
 	case ssa.OpRound:
 		return b.createIntrinsicCallWithArgs("llvm.round.f64", b.getArgs(expr), b.f64Type)
 	case ssa.OpRoundToEven:
@@ -3140,11 +3182,7 @@ func (b *builder) createExpr(expr *ssa.Value) llvm.Value {
 		// the second argument is the sign. However, the comments in genericOps.go is opposite.
 		return b.createIntrinsicCallWithArgs("llvm.copysign.f64", b.getArgs(expr), b.f64Type)
 	case ssa.OpFMA:
-		// we only support amd64 now.
-		if b.Config.CPU != llvm.CPU_X86_64 {
-			panic("TODO")
-		}
-		return b.createIntrinsicCallWithArgs("llvm.fma.f64", b.getArgs(expr), b.f64Type)
+		return b.createLibmOp(expr, "FMA", "fma")
 	case ssa.OpPhi:
 		// a merge point of memory
 		if expr.Type == types.TypeMem {
@@ -4567,6 +4605,9 @@ func (b *builder) getGlobal(expr *ssa.Value) llvm.Value {
 	}
 	s := expr.Aux.(*obj.LSym)
 	linkname := s.Name
+	if s.FuncPCABI0() {
+		linkname = c.getGoFunctionLLVMName(s)
+	}
 	global := c.mod.NamedGlobal(linkname)
 	if !global.IsNil() {
 		return global
