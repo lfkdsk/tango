@@ -55,6 +55,7 @@ TESTS=(slice quicksort intglobal \
     stackdefer \
     panicatend \
     nilerror \
+    nilmaparg \
     conststr \
     rsh8u64 \
     hmul64u \
