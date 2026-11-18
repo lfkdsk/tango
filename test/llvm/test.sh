@@ -105,6 +105,7 @@ TESTS=(largecalleearea slice quicksort intglobal \
     returnbool \
     packageinit \
     opendefergc \
+    tailcallgc \
 )
 
 DIRTESTS=(linkname abi)
