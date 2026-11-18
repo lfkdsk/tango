@@ -570,7 +570,11 @@ func FuncPC(pos src.XPos, n Node, wantABI obj.ABI) Node {
 		if abi != wantABI {
 			base.ErrorfAt(pos, 0, "internal/abi.FuncPC%s expects an %v function, %s is defined as %v", wantABI, wantABI, name.Sym().Name, abi)
 		}
-		var e Node = NewLinksymExpr(pos, name.LinksymABI(abi), types.Types[types.TUINTPTR])
+		sym := name.LinksymABI(abi)
+		if abi == obj.ABI0 {
+			sym.Set(obj.AttrFuncPCABI0, true)
+		}
+		var e Node = NewLinksymExpr(pos, sym, types.Types[types.TUINTPTR])
 		e = NewAddrExpr(pos, e)
 		e.SetType(types.Types[types.TUINTPTR].PtrTo())
 		e = NewConvExpr(pos, OCONVNOP, types.Types[types.TUINTPTR], e)

@@ -990,6 +990,10 @@ const (
 	// Linkname indicates this is a go:linkname'd symbol.
 	AttrLinkname
 
+	// AttrFuncPCABI0 identifies an ABI0 text symbol whose address is taken
+	// by the compiler before the assembler has assigned its symbol type.
+	AttrFuncPCABI0
+
 	// attrABIBase is the value at which the ABI is encoded in
 	// Attribute. This must be last; all bits after this are
 	// assumed to be an ABI value.
@@ -1016,6 +1020,7 @@ func (a *Attribute) WasInlined() bool         { return a.load()&AttrWasInlined !
 func (a *Attribute) Indexed() bool            { return a.load()&AttrIndexed != 0 }
 func (a *Attribute) UsedInIface() bool        { return a.load()&AttrUsedInIface != 0 }
 func (a *Attribute) ContentAddressable() bool { return a.load()&AttrContentAddressable != 0 }
+func (a *Attribute) FuncPCABI0() bool         { return a.load()&AttrFuncPCABI0 != 0 }
 func (a *Attribute) ABIWrapper() bool         { return a.load()&AttrABIWrapper != 0 }
 func (a *Attribute) IsPcdata() bool           { return a.load()&AttrPcdata != 0 }
 func (a *Attribute) IsPkgInit() bool          { return a.load()&AttrPkgInit != 0 }

@@ -1451,7 +1451,7 @@ func initIntrinsics(cfg *intrinsicBuildConfig) {
 			// 128-bit register will be zero. If h2 is also zero,
 			// then we'll get matches on those bytes. Truncate the
 			// upper bits to ignore such matches.
-			ret := s.newValue1(ssa.OpZeroExt8to64, types.Types[types.TUINT64], out)
+			ret := s.newValue1(ssa.OpZeroExt8to64, types.Types[types.TUINT64], s.newValue1(ssa.OpTrunc16to8, types.Types[types.TUINT8], out))
 
 			return ret
 		},
@@ -1512,7 +1512,7 @@ func initIntrinsics(cfg *intrinsicBuildConfig) {
 				// will keep all of these bytes zero, so no
 				// need to truncate.
 
-				return ret
+				return s.newValue1(ssa.OpZeroExt16to64, types.Types[types.TUINT64], ret)
 			}
 
 			// No PSIGNB, simply do byte equality with ctrlEmpty.
@@ -1542,7 +1542,7 @@ func initIntrinsics(cfg *intrinsicBuildConfig) {
 			// efp are also zero, so we'll get matches on those
 			// bytes. Truncate the upper bits to ignore such
 			// matches.
-			return s.newValue1(ssa.OpZeroExt8to64, types.Types[types.TUINT64], out)
+			return s.newValue1(ssa.OpZeroExt8to64, types.Types[types.TUINT64], s.newValue1(ssa.OpTrunc16to8, types.Types[types.TUINT8], out))
 		},
 		sys.AMD64)
 
@@ -1575,7 +1575,7 @@ func initIntrinsics(cfg *intrinsicBuildConfig) {
 			// 128-bit register will be zero. Zero will never match
 			// ctrlEmpty or ctrlDeleted, so no need to truncate.
 
-			return ret
+			return s.newValue1(ssa.OpZeroExt16to64, types.Types[types.TUINT64], ret)
 		},
 		sys.AMD64)
 
@@ -1609,7 +1609,7 @@ func initIntrinsics(cfg *intrinsicBuildConfig) {
 			// g is only 64-bits so the upper 64-bits of the
 			// 128-bit register will be zero, with bit 7 unset.
 			// Truncate the upper bits to ignore these.
-			return s.newValue1(ssa.OpZeroExt8to64, types.Types[types.TUINT64], out)
+			return s.newValue1(ssa.OpZeroExt8to64, types.Types[types.TUINT64], s.newValue1(ssa.OpTrunc16to8, types.Types[types.TUINT8], out))
 		},
 		sys.AMD64)
 
