@@ -258,8 +258,10 @@ func (l *ldPatchContext) patchSymbol(s loader.Sym, v *llvm.TargetSymbol) {
 			objabi.R_USETYPE,        // Type usage tracking
 			objabi.R_USEIFACEMETHOD, // Interface method usage
 			objabi.R_USENAMEDMETHOD: // Generic interface method usage
+			// The marker applies to the entire symbol. The old code
+			// offset is unrelated to the replacement body.
 			tmp = append(tmp, llvm.TargetReloc{
-				Off:  re.Off(),
+				Off:  0,
 				Siz:  re.Siz(),
 				Type: re.Type(),
 				Add:  re.Add(),

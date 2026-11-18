@@ -376,6 +376,9 @@ func patchSymbol(lsym *obj.LSym, symbol *llvm.TargetSymbol) {
 		for _, r := range lsym.R {
 			switch r.Type {
 			case objabi.R_USEFIELD, objabi.R_USEIFACE, objabi.R_USETYPE, objabi.R_USEIFACEMETHOD, objabi.R_USENAMEDMETHOD:
+				// These markers describe the symbol as a whole. Their old
+				// instruction offsets may be outside the new function body.
+				r.Off = 0
 				R = append(R, r)
 			}
 		}
