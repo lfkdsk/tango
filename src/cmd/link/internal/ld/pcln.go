@@ -479,6 +479,9 @@ func (state *pclntab) generatePctab(ctxt *Link, funcs []loader.Sym) {
 	// Walk the functions, finding offset to store each pcdata.
 	seen := make(map[loader.Sym]struct{})
 	saveOffset := func(pcSym loader.Sym) {
+		if pcSym == 0 {
+			return
+		}
 		if _, ok := seen[pcSym]; !ok {
 			datSize := ldr.SymSize(pcSym)
 			if datSize != 0 {
