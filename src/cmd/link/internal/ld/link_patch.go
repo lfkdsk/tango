@@ -22,6 +22,7 @@ import (
 	"internal/abi"
 	"os"
 	"reflect"
+	"slices"
 	"strings"
 )
 
@@ -431,6 +432,7 @@ type ldPatchContext struct {
 
 func (l *ldPatchContext) Init(p llvm.Patcher) {
 	l.p = p
+	l.globalFileTable = nil
 }
 
 func (l *ldPatchContext) prepareGlobalFileTable(p llvm.Patcher) {
@@ -545,30 +547,22 @@ func (l *ldPatchContext) ForEachTextSym(f func(pctxt llvm.PatchContext, tsym llv
 	l.prepareGlobalFileTable(l.p)
 
 	ldr := l.loader
-	nsym := loader.Sym(ldr.NSym())
+	var targets []loader.Sym
+	for llvmName := range l.p.SymbolNames() {
+		if l.p.Symbol(llvmName+"..funcinfo") == nil {
+			continue
+		}
+		name, abi := llvm.DecodeFuncNameAndABI(llvmName)
+		k := ldr.Lookup(name, sym.ABIToVersion(abi))
+		if k != 0 && ldr.SymType(k) == sym.STEXT && !ldr.AttrDuplicateOK(k) {
+			targets = append(targets, k)
+		}
+	}
+	slices.Sort(targets)
 	count := 0
-	// Process each symbol that has corresponding LLVM-generated data
-	for k := loader.Sym(1); k < nsym; k++ {
-		if ldr.SymType(k) != sym.STEXT {
-			continue
-		}
-
-		// Skip duplicate symbols
-		if ldr.AttrDuplicateOK(k) {
-			continue
-		}
-
-		name := ldr.SymName(k)
-		reqABI, ok := sym.VersionToABI(ldr.SymVersion(k))
-		if !ok {
-			continue
-		}
-		llvmname := llvm.EncodeFuncNameAndABI(name, reqABI)
-
-		tsymbol := l.p.Symbol(llvmname)
-		if tsymbol == nil {
-			continue
-		}
+	for _, k := range targets {
+		reqABI, _ := sym.VersionToABI(ldr.SymVersion(k))
+		tsymbol := l.p.Symbol(llvm.EncodeFuncNameAndABI(ldr.SymName(k), reqABI))
 
 		if err := l.checkPatchedTextSym(tsymbol); err != nil {
 			continue
@@ -1155,24 +1149,16 @@ func (l *ldPatchContext) CreateConstDataSymbol(data []byte, size int64, align in
 // This function reads LLVM-generated symbol data and patches the corresponding
 // Go symbols with updated code, data, and metadata.
 func patchSymbols(ctxt *Link) {
-	// RunLTO communicates the per-link output path through this process-local
-	// environment variable. It is an internal handoff, not user configuration.
-	lto := os.Getenv("LTO_BIN")
-	if lto == "" {
-		return // No LLVM-generated code to patch
+	if len(ctxt.llvmLTOObjects) == 0 {
+		return
 	}
-
-	// Read the LLVM-generated ELF file containing symbol data
-	b, err := os.ReadFile(lto)
-	if err != nil {
-		Exitf("read TangoLLVM LTO output %q: %v", lto, err)
-	}
-
-	pctxt := &ldPatchContext{
-		Link: ctxt,
-	}
-
+	pctxt := &ldPatchContext{Link: ctxt}
 	pctxt.init()
-
-	llvm.Patch(pctxt, b, ctxt.Debugvlog)
+	for _, object := range ctxt.llvmLTOObjects {
+		b, err := os.ReadFile(object)
+		if err != nil {
+			Exitf("read TangoLLVM LTO output %q: %v", object, err)
+		}
+		llvm.Patch(pctxt, b, ctxt.Debugvlog)
+	}
 }
