@@ -12,7 +12,9 @@ const CacheLinePadSize = 64
 func cpuid(eaxArg, ecxArg uint32) (eax, ebx, ecx, edx uint32)
 
 // xgetbv with ecx = 0 is implemented in cpu_x86.s.
-func xgetbv() (eax, edx uint32)
+// xgetbv is implemented in cpu_x86.s. ECX=0 reads XCR0; ECX=1 reads the
+// XINUSE bitmap when the processor supports it (see X86.HasXINUSE).
+func xgetbv(ecxArg uint32) (eax, edx uint32)
 
 // getGOAMD64level is implemented in cpu_x86.s. Returns number in [1,4].
 func getGOAMD64level() int32
@@ -140,7 +142,7 @@ func doinit() {
 	osSupportsAVX512 := false
 	// For XGETBV, OSXSAVE bit is required and sufficient.
 	if X86.HasOSXSAVE {
-		eax, _ := xgetbv()
+		eax, _ := xgetbv(0)
 		// Check if XMM and YMM registers have OS support.
 		osSupportsAVX = isSet(eax, 1<<1) && isSet(eax, 1<<2)
 
@@ -149,6 +151,15 @@ func doinit() {
 		//
 		// Check if opmask, ZMMhi256 and Hi16_ZMM have OS support.
 		osSupportsAVX512 = osSupportsAVX && isSet(eax, 1<<5) && isSet(eax, 1<<6) && isSet(eax, 1<<7)
+	}
+
+	// CPUID.(EAX=0DH,ECX=1):EAX[2] reports that XGETBV with ECX=1 returns
+	// the XINUSE bitmap, so the runtime can tell whether the upper vector
+	// state (YMM_Hi128 / opmask / ZMM_Hi256) is currently in use without
+	// touching it.
+	if maxID >= 0xD {
+		eaxD1, _, _, _ := cpuid(0xD, 1)
+		X86.HasXINUSE = X86.HasOSXSAVE && isSet(eaxD1, 1<<2)
 	}
 
 	X86.HasAVX = isSet(ecx1, cpuid_AVX) && osSupportsAVX

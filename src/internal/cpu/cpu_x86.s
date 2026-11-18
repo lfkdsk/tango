@@ -17,12 +17,17 @@ TEXT ·cpuid(SB), NOSPLIT, $0-24
 	MOVL DX, edx+20(FP)
 	RET
 
-// func xgetbv() (eax, edx uint32)
-TEXT ·xgetbv(SB),NOSPLIT,$0-8
-	MOVL $0, CX
+// func xgetbv(ecxArg uint32) (eax, edx uint32)
+//
+// ECX=0 reads XCR0 (enabled components); ECX=1 reads the XINUSE bitmap
+// (components in non-initialized state), only valid when X86.HasXINUSE is
+// set. The single 4-byte argument is padded to a pointer-sized slot so the
+// results stay 8-byte aligned in the ABI0 frame.
+TEXT ·xgetbv(SB),NOSPLIT,$0-16
+	MOVL ecxArg+0(FP), CX
 	XGETBV
-	MOVL AX, eax+0(FP)
-	MOVL DX, edx+4(FP)
+	MOVL AX, eax+8(FP)
+	MOVL DX, edx+12(FP)
 	RET
 
 // func getGOAMD64level() int32

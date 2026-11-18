@@ -29,6 +29,15 @@ import (
 type xRegState struct {
 	_    sys.NotInHeap // Allocated from xRegAlloc
 	regs xRegs
+
+	// upperSave records which upper vector components were in their
+	// non-initialized state when the goroutine was asynchronously
+	// preempted, and therefore have valid saved contents in regs. It is a
+	// bitmask of XINUSE component bits (1<<2 = AVX YMM_Hi128, 1<<5 =
+	// AVX-512 opmask, 1<<6 = ZMM_Hi256). Zero means only the low 128 bits
+	// of X0-X15 were saved and the restore path must keep the upper state
+	// initialized (VZEROUPPER) instead of reloading stale bytes.
+	upperSave uint8
 }
 
 // xRegPerG stores extended register state while a goroutine is asynchronously
@@ -43,6 +52,10 @@ type xRegPerP struct {
 	// state before entering Go. It's quickly copied to per-G state.
 	scratch xRegs
 
+	// scratchUpper is the XINUSE-derived component mask captured by
+	// [asyncPreempt] alongside scratch; see xRegState.upperSave.
+	scratchUpper uint8
+
 	// cache is a 1-element allocation cache of extended register state used by
 	// asynchronous preemption. On entry to preemption, this is used as a simple
 	// allocation cache. On exit from preemption, the G's xRegState is always
@@ -51,6 +64,10 @@ type xRegPerP struct {
 	// delay-freeing the allocated xRegState until after we've definitely
 	// restored it.
 	cache *xRegState
+
+	// cacheUpper mirrors xRegState.upperSave of the block in cache so the
+	// asyncPreempt restore assembly can select the matching restore path.
+	cacheUpper uint8
 }
 
 // xRegAlloc allocates xRegState objects.
@@ -95,6 +112,7 @@ func xRegSave(gp *g) {
 	// that aren't in use), we could have multiple allocation pools for
 	// different size states and copy only the registers we need.
 	dest.regs = pp.xRegs.scratch
+	dest.upperSave = pp.xRegs.scratchUpper
 
 	// Save on the G.
 	gp.xRegs.state = dest
@@ -124,6 +142,7 @@ func xRegRestore(gp *g) {
 		})
 	}
 	pp.xRegs.cache = gp.xRegs.state
+	pp.xRegs.cacheUpper = gp.xRegs.state.upperSave
 	gp.xRegs.state = nil
 }
 
@@ -132,6 +151,7 @@ func (xRegs *xRegPerP) free() {
 		lock(&xRegAlloc.lock)
 		xRegAlloc.alloc.free(unsafe.Pointer(xRegs.cache))
 		xRegs.cache = nil
+		xRegs.cacheUpper = 0
 		unlock(&xRegAlloc.lock)
 	}
 }

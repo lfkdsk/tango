@@ -16,6 +16,7 @@ const (
 	offsetX86HasAVX512 = unsafe.Offsetof(cpu.X86.HasAVX512) // F+CD+BW+DQ+VL
 	offsetX86HasERMS   = unsafe.Offsetof(cpu.X86.HasERMS)
 	offsetX86HasRDTSCP = unsafe.Offsetof(cpu.X86.HasRDTSCP)
+	offsetX86HasXINUSE = unsafe.Offsetof(cpu.X86.HasXINUSE)
 
 	offsetARMHasIDIVA = unsafe.Offsetof(cpu.ARM.HasIDIVA)
 

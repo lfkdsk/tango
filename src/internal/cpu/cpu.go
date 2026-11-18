@@ -57,7 +57,12 @@ var X86 struct {
 	HasSSE41            bool
 	HasSSE42            bool
 	HasVAES             bool
-	_                   CacheLinePad
+	// HasXINUSE reports that XGETBV with ECX=1 returns the XINUSE bitmap
+	// (CPUID.(EAX=0DH,ECX=1):EAX[2]), which lets software test whether an
+	// XSAVE state component is currently in its initialized state without
+	// executing XRSTOR.
+	HasXINUSE bool
+	_         CacheLinePad
 }
 
 // The booleans in ARM contain the correspondingly named cpu feature bit.

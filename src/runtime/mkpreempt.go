@@ -389,6 +389,14 @@ func genAMD64(g *gen) {
 
 	p, label := g.p, g.label
 
+	// XINUSE (XGETBV with ECX=1) component bits we care about:
+	// bit 2 = AVX YMM_Hi128, bit 5 = AVX-512 opmask, bit 6 = ZMM_Hi256,
+	// bit 7 = Hi16_ZMM (the 32-register file on amd64).
+	const (
+		xregAvxUpperMask    = 1 << 2
+		xregAvx512UpperMask = 1<<2 | 1<<5 | 1<<6 | 1<<7
+	)
+
 	// Assign stack offsets.
 	var l = layout{sp: "SP"}
 	for _, reg := range regNamesAMD64 {
@@ -451,41 +459,81 @@ func genAMD64(g *gen) {
 	// ensure we're in ABIInternal register state.
 	p("// Save extended register state to p.xRegs.scratch")
 	p("// Don't make assumptions about ABI register state. See mkpreempt.go")
+	p("// BX holds the P pointer for the whole routine; AX holds the scratch/cache pointer.")
 	p("get_tls(CX)")
 	p("MOVQ g(CX), R14")
 	p("MOVQ g_m(R14), %s", xReg)
-	p("MOVQ m_p(%s), %s", xReg, xReg)
-	p("LEAQ (p_xRegs+xRegPerP_scratch)(%s), %s", xReg, xReg)
+	p("MOVQ m_p(%s), BX", xReg)
+	p("LEAQ (p_xRegs+xRegPerP_scratch)(BX), %s", xReg)
 
 	// Which registers do we need to save?
 	p("#ifdef GOEXPERIMENT_simd")
 	p("CMPB internal∕cpu·X86+const_offsetX86HasAVX512(SB), $1")
 	p("JE saveAVX512")
 	p("CMPB internal∕cpu·X86+const_offsetX86HasAVX2(SB), $1")
-	p("JE saveAVX2")
+	p("JE saveAVX2Check")
 	p("#endif")
 
 	// No features. Assume only SSE.
 	label("saveSSE:")
+	p("MOVB $0, (p_xRegs+xRegPerP_scratchUpper)(BX)")
 	lXRegs.save(g)
 	p("JMP preempt")
 
+	p("#ifdef GOEXPERIMENT_simd")
+	label("saveAVX2Check:")
+	p("// With XINUSE, save the YMM upper halves only when they are")
+	p("// currently non-initialized. Otherwise the interrupted code is")
+	p("// legacy SSE and a full restore would dirty its upper state.")
+	p("CMPB internal∕cpu·X86+const_offsetX86HasXINUSE(SB), $1")
+	p("JNE saveAVX2")
+	p("MOVL $1, CX")
+	p("XGETBV") // EDX:EAX = XINUSE; clobbers the scratch pointer in AX
+	p("TESTL $%d, AX", xregAvxUpperMask)
+	p("JZ saveSSEXinuse")
 	label("saveAVX2:")
+	p("LEAQ (p_xRegs+xRegPerP_scratch)(BX), %s", xReg)
+	p("MOVB $%d, (p_xRegs+xRegPerP_scratchUpper)(BX)", xregAvxUpperMask)
 	lYRegs.save(g)
 	p("JMP preempt")
-
+	label("saveSSEXinuse:")
+	p("LEAQ (p_xRegs+xRegPerP_scratch)(BX), %s", xReg)
+	p("MOVB $0, (p_xRegs+xRegPerP_scratchUpper)(BX)")
+	lXRegs.save(g)
+	p("JMP preempt")
 	label("saveAVX512:")
+	p("// AVX-512: any dirty YMM_Hi128/opmask/ZMM component forces the full")
+	p("// save; when all are initialized the XMM path is sufficient.")
+	p("CMPB internal∕cpu·X86+const_offsetX86HasXINUSE(SB), $1")
+	p("JNE saveAVX512Full")
+	p("MOVL $1, CX")
+	p("XGETBV") // EDX:EAX = XINUSE; clobbers the scratch pointer in AX
+	p("TESTL $%d, AX", xregAvx512UpperMask)
+	p("JZ saveSSE512")
+	label("saveAVX512Full:")
+	p("LEAQ (p_xRegs+xRegPerP_scratch)(BX), %s", xReg)
+	p("MOVB $%d, (p_xRegs+xRegPerP_scratchUpper)(BX)", xregAvx512UpperMask)
 	lZRegs.save(g)
 	p("JMP preempt")
+	label("saveSSE512:")
+	p("LEAQ (p_xRegs+xRegPerP_scratch)(BX), %s", xReg)
+	p("MOVB $0, (p_xRegs+xRegPerP_scratchUpper)(BX)")
+	lXRegs.save(g)
+	p("JMP preempt")
+	p("#endif")
 
 	label("preempt:")
 	p("CALL ·asyncPreempt2(SB)")
 
-	p("// Restore non-GPs from *p.xRegs.cache")
+	p("// Restore non-GPs from *p.xRegs.cache. The restore path must match")
+	p("// the save path recorded in p.xRegs.cacheUpper, not the current")
+	p("// XINUSE state, because the runtime itself may touch vector")
+	p("// registers while handling the preemption.")
 	p("MOVQ g_m(R14), %s", xReg)
-	p("MOVQ m_p(%s), %s", xReg, xReg)
-	p("MOVQ (p_xRegs+xRegPerP_cache)(%s), %s", xReg, xReg)
-
+	p("MOVQ m_p(%s), BX", xReg)
+	p("MOVQ (p_xRegs+xRegPerP_cache)(BX), %s", xReg)
+	p("CMPB (p_xRegs+xRegPerP_cacheUpper)(BX), $0")
+	p("JE restoreSSE")
 	p("#ifdef GOEXPERIMENT_simd")
 	p("CMPB internal∕cpu·X86+const_offsetX86HasAVX512(SB), $1")
 	p("JE restoreAVX512")
@@ -495,8 +543,16 @@ func genAMD64(g *gen) {
 
 	label("restoreSSE:")
 	lXRegs.restore(g)
+	p("// Upper state was initialized at interrupt time (or no SIMD experiment):")
+	p("// leave it initialized instead of reloading stale scratch bytes.")
+	p("#ifdef GOEXPERIMENT_simd")
+	p("CMPB internal∕cpu·X86+const_offsetX86HasAVX(SB), $1")
+	p("JNE restoreGPs")
+	p("VZEROUPPER")
+	p("#endif")
 	p("JMP restoreGPs")
 
+	p("#ifdef GOEXPERIMENT_simd")
 	label("restoreAVX2:")
 	lYRegs.restore(g)
 	p("JMP restoreGPs")
@@ -504,6 +560,7 @@ func genAMD64(g *gen) {
 	label("restoreAVX512:")
 	lZRegs.restore(g)
 	p("JMP restoreGPs")
+	p("#endif")
 
 	label("restoreGPs:")
 	p("// Restore GPs")

@@ -31,18 +31,20 @@ TEXT ·asyncPreempt(SB),NOSPLIT|NOFRAME,$0-0
 	MOVQ R15, 104(SP)
 	// Save extended register state to p.xRegs.scratch
 	// Don't make assumptions about ABI register state. See mkpreempt.go
+	// BX holds the P pointer for the whole routine; AX holds the scratch/cache pointer.
 	get_tls(CX)
 	MOVQ g(CX), R14
 	MOVQ g_m(R14), AX
-	MOVQ m_p(AX), AX
-	LEAQ (p_xRegs+xRegPerP_scratch)(AX), AX
+	MOVQ m_p(AX), BX
+	LEAQ (p_xRegs+xRegPerP_scratch)(BX), AX
 	#ifdef GOEXPERIMENT_simd
 	CMPB internal∕cpu·X86+const_offsetX86HasAVX512(SB), $1
 	JE saveAVX512
 	CMPB internal∕cpu·X86+const_offsetX86HasAVX2(SB), $1
-	JE saveAVX2
+	JE saveAVX2Check
 	#endif
 saveSSE:
+	MOVB $0, (p_xRegs+xRegPerP_scratchUpper)(BX)
 	MOVUPS X0, 0(AX)
 	MOVUPS X1, 64(AX)
 	MOVUPS X2, 128(AX)
@@ -60,7 +62,20 @@ saveSSE:
 	MOVUPS X14, 896(AX)
 	MOVUPS X15, 960(AX)
 	JMP preempt
+	#ifdef GOEXPERIMENT_simd
+saveAVX2Check:
+	// With XINUSE, save the YMM upper halves only when they are
+	// currently non-initialized. Otherwise the interrupted code is
+	// legacy SSE and a full restore would dirty its upper state.
+	CMPB internal∕cpu·X86+const_offsetX86HasXINUSE(SB), $1
+	JNE saveAVX2
+	MOVL $1, CX
+	XGETBV
+	TESTL $4, AX
+	JZ saveSSEXinuse
 saveAVX2:
+	LEAQ (p_xRegs+xRegPerP_scratch)(BX), AX
+	MOVB $4, (p_xRegs+xRegPerP_scratchUpper)(BX)
 	VMOVDQU Y0, 0(AX)
 	VMOVDQU Y1, 64(AX)
 	VMOVDQU Y2, 128(AX)
@@ -78,7 +93,38 @@ saveAVX2:
 	VMOVDQU Y14, 896(AX)
 	VMOVDQU Y15, 960(AX)
 	JMP preempt
+saveSSEXinuse:
+	LEAQ (p_xRegs+xRegPerP_scratch)(BX), AX
+	MOVB $0, (p_xRegs+xRegPerP_scratchUpper)(BX)
+	MOVUPS X0, 0(AX)
+	MOVUPS X1, 64(AX)
+	MOVUPS X2, 128(AX)
+	MOVUPS X3, 192(AX)
+	MOVUPS X4, 256(AX)
+	MOVUPS X5, 320(AX)
+	MOVUPS X6, 384(AX)
+	MOVUPS X7, 448(AX)
+	MOVUPS X8, 512(AX)
+	MOVUPS X9, 576(AX)
+	MOVUPS X10, 640(AX)
+	MOVUPS X11, 704(AX)
+	MOVUPS X12, 768(AX)
+	MOVUPS X13, 832(AX)
+	MOVUPS X14, 896(AX)
+	MOVUPS X15, 960(AX)
+	JMP preempt
 saveAVX512:
+	// AVX-512: any dirty YMM_Hi128/opmask/ZMM component forces the full
+	// save; when all are initialized the XMM path is sufficient.
+	CMPB internal∕cpu·X86+const_offsetX86HasXINUSE(SB), $1
+	JNE saveAVX512Full
+	MOVL $1, CX
+	XGETBV
+	TESTL $228, AX
+	JZ saveSSE512
+saveAVX512Full:
+	LEAQ (p_xRegs+xRegPerP_scratch)(BX), AX
+	MOVB $228, (p_xRegs+xRegPerP_scratchUpper)(BX)
 	VMOVDQU64 Z0, 0(AX)
 	VMOVDQU64 Z1, 64(AX)
 	VMOVDQU64 Z2, 128(AX)
@@ -120,12 +166,38 @@ saveAVX512:
 	KMOVQ K6, 2096(AX)
 	KMOVQ K7, 2104(AX)
 	JMP preempt
+saveSSE512:
+	LEAQ (p_xRegs+xRegPerP_scratch)(BX), AX
+	MOVB $0, (p_xRegs+xRegPerP_scratchUpper)(BX)
+	MOVUPS X0, 0(AX)
+	MOVUPS X1, 64(AX)
+	MOVUPS X2, 128(AX)
+	MOVUPS X3, 192(AX)
+	MOVUPS X4, 256(AX)
+	MOVUPS X5, 320(AX)
+	MOVUPS X6, 384(AX)
+	MOVUPS X7, 448(AX)
+	MOVUPS X8, 512(AX)
+	MOVUPS X9, 576(AX)
+	MOVUPS X10, 640(AX)
+	MOVUPS X11, 704(AX)
+	MOVUPS X12, 768(AX)
+	MOVUPS X13, 832(AX)
+	MOVUPS X14, 896(AX)
+	MOVUPS X15, 960(AX)
+	JMP preempt
+	#endif
 preempt:
 	CALL ·asyncPreempt2(SB)
-	// Restore non-GPs from *p.xRegs.cache
+	// Restore non-GPs from *p.xRegs.cache. The restore path must match
+	// the save path recorded in p.xRegs.cacheUpper, not the current
+	// XINUSE state, because the runtime itself may touch vector
+	// registers while handling the preemption.
 	MOVQ g_m(R14), AX
-	MOVQ m_p(AX), AX
-	MOVQ (p_xRegs+xRegPerP_cache)(AX), AX
+	MOVQ m_p(AX), BX
+	MOVQ (p_xRegs+xRegPerP_cache)(BX), AX
+	CMPB (p_xRegs+xRegPerP_cacheUpper)(BX), $0
+	JE restoreSSE
 	#ifdef GOEXPERIMENT_simd
 	CMPB internal∕cpu·X86+const_offsetX86HasAVX512(SB), $1
 	JE restoreAVX512
@@ -149,7 +221,15 @@ restoreSSE:
 	MOVUPS 128(AX), X2
 	MOVUPS 64(AX), X1
 	MOVUPS 0(AX), X0
+	// Upper state was initialized at interrupt time (or no SIMD experiment):
+	// leave it initialized instead of reloading stale scratch bytes.
+	#ifdef GOEXPERIMENT_simd
+	CMPB internal∕cpu·X86+const_offsetX86HasAVX(SB), $1
+	JNE restoreGPs
+	VZEROUPPER
+	#endif
 	JMP restoreGPs
+	#ifdef GOEXPERIMENT_simd
 restoreAVX2:
 	VMOVDQU 960(AX), Y15
 	VMOVDQU 896(AX), Y14
@@ -210,6 +290,7 @@ restoreAVX512:
 	VMOVDQU64 64(AX), Z1
 	VMOVDQU64 0(AX), Z0
 	JMP restoreGPs
+	#endif
 restoreGPs:
 	// Restore GPs
 	MOVQ 104(SP), R15
