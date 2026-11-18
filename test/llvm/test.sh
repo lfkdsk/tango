@@ -21,7 +21,7 @@ else
   exit 1
 fi
 
-TESTS=(slice quicksort intglobal \
+TESTS=(largecalleearea slice quicksort intglobal \
     complex copy idata multiexit selectnaddr \
     atomic \
     reflect \
