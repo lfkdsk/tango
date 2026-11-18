@@ -1921,8 +1921,11 @@ func (b *builder) BuildLLVM() {
 	// TODO: merge into go.caller.args.area
 	{
 		var mdarray []llvm.Metadata
-		for n, v := range b.locals {
-			if n.Class != ir.PPARAM {
+		// Emit metadata in parameter declaration order so identical compilations
+		// produce identical ThinLTO summaries.
+		for _, n := range b.curfn().Dcl {
+			v, ok := b.locals[n]
+			if n.Class != ir.PPARAM || !ok {
 				continue
 			}
 			if !v.IsAAllocaInst().IsNil() {
