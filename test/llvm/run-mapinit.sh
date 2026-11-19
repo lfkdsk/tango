@@ -24,7 +24,7 @@ GO
 for mode in llvm thin; do
     flags='all=-beast=llvm=3,optimize=3,inline=1'
     if [[ $mode == thin ]]; then flags+=',thin-lto=1'; fi
-    "$go" build -ldflags=-maxparallel=4 -gcflags="$flags" -o "$work/check" "$work/main.go"
+    "$go" build -trimpath -ldflags=-maxparallel=4 -gcflags="$flags" -o "$work/check" "$work/main.go"
     "$work/check"
     "$go" tool nm "$work/check" > "$work/symbols"
     if grep -Eq ' [BD] unicode\.(Scripts|Properties)$' "$work/symbols"; then
