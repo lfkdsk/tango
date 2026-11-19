@@ -392,12 +392,26 @@ func (b *Builder) buildActionID(a *Action) cache.ActionID {
 			"GOSSAFUNC",
 			"GOSSADIR",
 			"GOCOMPILEDEBUG",
-			"GOLLVMDENYLIST",
-			"GOLLVMUNBLACKLIST",
 		}
 		for _, env := range magic {
 			if x := os.Getenv(env); x != "" {
 				fmt.Fprintf(h, "magic %s=%s\n", env, x)
+			}
+		}
+
+		// These lists affect which bodies the LLVM backend compiles.
+		for _, key := range []string{
+			"GOLLVMUNBLACKLIST", "GOLLVMALLOWLIST", "GOLLVMDENYLIST",
+			"GOLLVMALLOWEDPKGS", "GOLLVMDISALLOWEDPKGS",
+		} {
+			if value := os.Getenv(key); value != "" {
+				fmt.Fprintf(h, "%s=%q\n", key, value)
+			}
+		}
+		for _, key := range []string{"GOLLVMALLOWLISTFILE", "GOLLVMALLOWEDPKGSFILE"} {
+			if path := os.Getenv(key); path != "" {
+				sum, _ := cache.FileHash(path) // The compiler reports read errors.
+				fmt.Fprintf(h, "%s=%q %x\n", key, path, sum)
 			}
 		}
 
