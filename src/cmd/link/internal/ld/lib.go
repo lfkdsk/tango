@@ -2011,20 +2011,9 @@ func (ctxt *Link) hostlink() {
 		argv = append(argv, peimporteddlls()...)
 	}
 
-	argv = ctxt.passLongArgsInResponseFile(argv, altLinker)
-
-	if ctxt.Debugvlog != 0 {
-		ctxt.Logf("host link:")
-		for _, v := range argv {
-			ctxt.Logf(" %q", v)
-		}
-		ctxt.Logf("\n")
-	}
-
-	cmd := exec.Command(argv[0], argv[1:]...)
-	out, err := cmd.CombinedOutput()
+	out, err := ctxt.runHostLink(argv, altLinker)
 	if err != nil {
-		Exitf("running %s failed: %v\n%s\n%s", argv[0], err, cmd, out)
+		Exitf("running %s failed: %v\n%s", argv[0], err, out)
 	}
 
 	// Filter out useless linker warnings caused by bugs outside Go.
@@ -2170,6 +2159,85 @@ func (ctxt *Link) hostlink() {
 			Exitf("%s: code signing failed: %v", os.Args[0], err)
 		}
 	}
+}
+
+// runHostLink retries known AMD64 relocation overflows on Linux. Moving the
+// Go PC tables after .bss can keep writable data within signed 32-bit reach.
+// The PC table stores relative offsets and moduledata points to it by address.
+func (ctxt *Link) runHostLink(argv []string, altLinker string) ([]byte, error) {
+	run := func(args []string) ([]byte, error) {
+		args = ctxt.passLongArgsInResponseFile(args, altLinker)
+		if ctxt.Debugvlog != 0 {
+			ctxt.Logf("host link:")
+			for _, arg := range args {
+				ctxt.Logf(" %q", arg)
+			}
+			ctxt.Logf("\n")
+		}
+		cmd := exec.Command(args[0], args[1:]...)
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			err = fmt.Errorf("%w\n%s", err, cmd)
+		}
+		return out, err
+	}
+
+	out, err := run(argv)
+	if err == nil || ctxt.HeadType != objabi.Hlinux || !ctxt.IsAMD64() {
+		return out, err
+	}
+	gotOverflow := func(out []byte) bool {
+		return bytes.Contains(out, []byte("GOTPCREL")) && bytes.Contains(out, []byte("--no-relax"))
+	}
+	cloneOverflow := bytes.Contains(out, []byte("crtbegin")) &&
+		bytes.Contains(out, []byte("R_X86_64_32S")) && bytes.Contains(out, []byte(".tm_clone_table"))
+	if !gotOverflow(out) && !cloneOverflow {
+		return out, err
+	}
+
+	layoutOK, relaxOK := hostLinkRetryOptions(argv[1:])
+	var failures []byte
+	if layoutOK && ctxt.BuildMode == BuildModeExe && !ctxt.linkShared && !ctxt.UseRelro() {
+		script := filepath.Join(*flagTmpdir, "go-pclntab.ld")
+		const layout = "SECTIONS { .gopclntab ALIGN(CONSTANT(MAXPAGESIZE)) : { *(.gopclntab) } }\nINSERT AFTER .bss;\n"
+		if writeErr := os.WriteFile(script, []byte(layout), 0666); writeErr != nil {
+			return fmt.Appendf(out, "writing host link layout: %v\n", writeErr), err
+		}
+		failures = append(failures, out...)
+		argv = append(argv, "-Xlinker", "-T", "-Xlinker", script)
+		out, err = run(argv)
+	}
+	if err != nil && relaxOK && gotOverflow(out) {
+		failures = append(failures, out...)
+		out, err = run(append(argv, "-Wl,--no-relax"))
+	}
+	if err != nil {
+		out = append(failures, out...)
+	}
+	return out, err
+}
+
+// An explicit layout or relaxation setting belongs to the caller.
+func hostLinkRetryOptions(args []string) (layout, relax bool) {
+	layout, relax = true, true
+	for _, arg := range args {
+		for _, opt := range strings.Split(strings.TrimPrefix(arg, "-Wl,"), ",") {
+			switch {
+			case strings.HasPrefix(opt, "@"):
+				// A response file can contain either option.
+				return false, false
+			case strings.HasPrefix(opt, "-T"), strings.HasPrefix(opt, "-dT"),
+				opt == "--script", strings.HasPrefix(opt, "--script="),
+				opt == "--default-script", strings.HasPrefix(opt, "--default-script="),
+				opt == "--section-start", strings.HasPrefix(opt, "--section-start="),
+				opt == "--section-ordering-file", strings.HasPrefix(opt, "--section-ordering-file="):
+				layout = false
+			case opt == "--relax" || opt == "--no-relax":
+				relax = false
+			}
+		}
+	}
+	return layout, relax
 }
 
 // passLongArgsInResponseFile writes the arguments into a file if they
