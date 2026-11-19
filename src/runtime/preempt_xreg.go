@@ -32,11 +32,13 @@ type xRegState struct {
 
 	// upperSave records which upper vector components were in their
 	// non-initialized state when the goroutine was asynchronously
-	// preempted, and therefore have valid saved contents in regs. It is a
-	// bitmask of XINUSE component bits (1<<2 = AVX YMM_Hi128, 1<<5 =
-	// AVX-512 opmask, 1<<6 = ZMM_Hi256). Zero means only the low 128 bits
-	// of X0-X15 were saved and the restore path must keep the upper state
-	// initialized (VZEROUPPER) instead of reloading stale bytes.
+	// preempted, and therefore have valid saved contents in regs. It is
+	// a bitmask of XINUSE component bits (1<<2 = AVX YMM_Hi128, 1<<5 =
+	// AVX-512 opmask, 1<<6 = ZMM_Hi256, 1<<7 = Hi16_ZMM). The low 128
+	// bits of X0-X15 are always saved. Zero means only those were saved
+	// and the restore path keeps the upper state initialized
+	// (VZEROUPPER) instead of reloading stale bytes; a non-zero mask
+	// restores each recorded component independently.
 	upperSave uint8
 }
 

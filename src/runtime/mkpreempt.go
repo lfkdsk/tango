@@ -392,9 +392,20 @@ func genAMD64(g *gen) {
 	// XINUSE (XGETBV with ECX=1) component bits we care about:
 	// bit 2 = AVX YMM_Hi128, bit 5 = AVX-512 opmask, bit 6 = ZMM_Hi256,
 	// bit 7 = Hi16_ZMM (the 32-register file on amd64).
+	//
+	// The bitmap is conservative: a set bit means the component may be in
+	// its non-initialized state, so an extra save is only wasted work; a
+	// clear bit guarantees initialized state. VZEROUPPER reliably clears
+	// only the low-16 upper components (bits 2 and 6); it never modifies
+	// the opmask registers and its effect on ZMM16-31 is uarch dependent,
+	// so every saved component is restored with an explicit reload.
 	const (
-		xregAvxUpperMask    = 1 << 2
-		xregAvx512UpperMask = 1<<2 | 1<<5 | 1<<6 | 1<<7
+		xregCompYMMHi128    = 1 << 2
+		xregCompOpmask      = 1 << 5
+		xregCompZMMHi256    = 1 << 6
+		xregCompHi16ZMM     = 1 << 7
+		xregAvxUpperMask    = xregCompYMMHi128
+		xregAvx512UpperMask = xregCompYMMHi128 | xregCompOpmask | xregCompZMMHi256 | xregCompHi16ZMM
 	)
 
 	// Assign stack offsets.
@@ -437,6 +448,14 @@ func genAMD64(g *gen) {
 
 	}
 	writeXRegs(g.goarch, &lZRegs)
+
+	// Component-granular AVX-512 layouts, sharing the xRegState offsets of
+	// lZRegs so partial saves land in the same slots as full saves:
+	// Z0-15 (low-16 full 512-bit state), Z16-31 (Hi16_ZMM component) and
+	// the opmask file K0-7.
+	lZLow16 := layout{sp: xReg, regs: lZRegs.regs[0:numXRegs]}
+	lZHigh16 := layout{sp: xReg, regs: lZRegs.regs[numXRegs:numZRegs]}
+	lKRegs := layout{sp: xReg, regs: lZRegs.regs[numZRegs:]}
 
 	p("PUSHQ BP")
 	p("MOVQ SP, BP")
@@ -502,23 +521,41 @@ func genAMD64(g *gen) {
 	lXRegs.save(g)
 	p("JMP preempt")
 	label("saveAVX512:")
-	p("// AVX-512: any dirty YMM_Hi128/opmask/ZMM component forces the full")
-	p("// save; when all are initialized the XMM path is sufficient.")
+	p("// AVX-512 with XINUSE: record the actual component mask and save")
+	p("// only the components that are non-initialized. The low 128 bits of")
+	p("// X0-X15 are always saved; the YMM/ZMM upper state, opmask file and")
+	p("// ZMM16-31 are saved independently as their XINUSE components are set.")
 	p("CMPB internal∕cpu·X86+const_offsetX86HasXINUSE(SB), $1")
 	p("JNE saveAVX512Full")
 	p("MOVL $1, CX")
 	p("XGETBV") // EDX:EAX = XINUSE; clobbers the scratch pointer in AX
-	p("TESTL $%d, AX", xregAvx512UpperMask)
-	p("JZ saveSSE512")
+	p("ANDL $%d, AX", xregAvx512UpperMask)
+	p("MOVL AX, DX") // DX carries the component mask through the saves
+	p("LEAQ (p_xRegs+xRegPerP_scratch)(BX), %s", xReg)
+	p("MOVB DL, (p_xRegs+xRegPerP_scratchUpper)(BX)")
+	lXRegs.save(g)
+	p("TESTL $%d, DX", xregCompZMMHi256)
+	p("JZ saveAVX512Hi128")
+	lZLow16.save(g) // full 512-bit state of Z0-15 covers YMM_Hi128 too
+	p("JMP saveAVX512Opmask")
+	label("saveAVX512Hi128:")
+	p("TESTL $%d, DX", xregCompYMMHi128)
+	p("JZ saveAVX512Opmask")
+	lYRegs.save(g)
+	label("saveAVX512Opmask:")
+	p("TESTL $%d, DX", xregCompOpmask)
+	p("JZ saveAVX512Hi16")
+	lKRegs.save(g)
+	label("saveAVX512Hi16:")
+	p("TESTL $%d, DX", xregCompHi16ZMM)
+	p("JZ preempt")
+	lZHigh16.save(g)
+	p("JMP preempt")
 	label("saveAVX512Full:")
+	p("// No XINUSE: conservatively save the whole vector and opmask state.")
 	p("LEAQ (p_xRegs+xRegPerP_scratch)(BX), %s", xReg)
 	p("MOVB $%d, (p_xRegs+xRegPerP_scratchUpper)(BX)", xregAvx512UpperMask)
 	lZRegs.save(g)
-	p("JMP preempt")
-	label("saveSSE512:")
-	p("LEAQ (p_xRegs+xRegPerP_scratch)(BX), %s", xReg)
-	p("MOVB $0, (p_xRegs+xRegPerP_scratchUpper)(BX)")
-	lXRegs.save(g)
 	p("JMP preempt")
 	p("#endif")
 
@@ -532,7 +569,8 @@ func genAMD64(g *gen) {
 	p("MOVQ g_m(R14), %s", xReg)
 	p("MOVQ m_p(%s), BX", xReg)
 	p("MOVQ (p_xRegs+xRegPerP_cache)(BX), %s", xReg)
-	p("CMPB (p_xRegs+xRegPerP_cacheUpper)(BX), $0")
+	p("MOVB (p_xRegs+xRegPerP_cacheUpper)(BX), DX") // DX = saved component mask
+	p("TESTB DL, DL")
 	p("JE restoreSSE")
 	p("#ifdef GOEXPERIMENT_simd")
 	p("CMPB internal∕cpu·X86+const_offsetX86HasAVX512(SB), $1")
@@ -558,7 +596,32 @@ func genAMD64(g *gen) {
 	p("JMP restoreGPs")
 
 	label("restoreAVX512:")
-	lZRegs.restore(g)
+	p("// Restore the low 128 bits, then VZEROUPPER so the low-16 upper")
+	p("// state returns to initialized even when only opmask and/or ZMM16-31")
+	p("// were live at interrupt time. VZEROUPPER never touches K, and its")
+	p("// effect on ZMM16-31 is not architectural for our purpose, so every")
+	p("// saved component is reloaded explicitly afterwards. DL keeps the")
+	p("// component mask across these vector instructions.")
+	lXRegs.restore(g)
+	p("VZEROUPPER")
+	p("TESTB $%d, DL", xregCompZMMHi256)
+	p("JZ restoreAVX512Hi128")
+	lZLow16.restore(g)
+	p("JMP restoreAVX512Opmask")
+	label("restoreAVX512Hi128:")
+	p("TESTB $%d, DL", xregCompYMMHi128)
+	p("JZ restoreAVX512Opmask")
+	lYRegs.restore(g)
+	label("restoreAVX512Opmask:")
+	p("TESTB $%d, DL", xregCompOpmask)
+	p("JZ restoreAVX512Hi16")
+	lKRegs.restore(g)
+	label("restoreAVX512Hi16:")
+	p("TESTB $%d, DL", xregCompHi16ZMM)
+	p("JZ restoreGPs")
+	// ZMM16-31 must be reloaded after VZEROUPPER, which may zero part of
+	// them on some microarchitectures.
+	lZHigh16.restore(g)
 	p("JMP restoreGPs")
 	p("#endif")
 
