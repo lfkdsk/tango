@@ -748,10 +748,10 @@ func (state pclntab) calculateFunctabSize(ctxt *Link, funcs []loader.Sym) (int64
 	// value that marks the end of the last function in the binary.
 	size := int64(int(state.nfunc)*2*4 + 4)
 
-	// Now find the space for the func objects. We do this in a running manner,
-	// so that we can find individual starting locations.
+	// runtime._func and its trailing pcdata and funcdata offsets need only
+	// 4-byte alignment. The PC table and each record are a whole number
+	// of 4-byte words, so consecutive records are already aligned.
 	for i, s := range funcs {
-		size = Rnd(size, int64(ctxt.Arch.PtrSize))
 		startLocations[i] = uint32(size)
 		fi := ldr.FuncInfo(s)
 		size += funcSize
