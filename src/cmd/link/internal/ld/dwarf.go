@@ -40,9 +40,10 @@ import (
 // of type conversion (this is just a convenience; it would be easy to
 // split these things out into another type if need be).
 type dwctxt struct {
-	linkctxt *Link
-	ldr      *loader.Loader
-	arch     *sys.Arch
+	llvmAbstract map[loader.Sym]dwarf.Sym
+	linkctxt     *Link
+	ldr          *loader.Loader
+	arch         *sys.Arch
 
 	// This maps type name string (e.g. "uintptr") to loader symbol for
 	// the DWARF DIE for that type (e.g. "go:info.type.uintptr")
@@ -170,7 +171,10 @@ func (c dwctxt) RecordDclReference(s dwarf.Sym, t dwarf.Sym, dclIdx int, inlInde
 }
 
 func (c dwctxt) RecordChildDieOffsets(s dwarf.Sym, vars []*dwarf.Var, offsets []int32) {
-	panic("should be used only in the compiler")
+	// LLVM can synthesize an abstract origin with no variable DIEs.
+	if len(vars) != 0 || len(offsets) != 0 {
+		panic("should be used only in the compiler")
+	}
 }
 
 func isDwarf64(ctxt *Link) bool {
@@ -1340,7 +1344,7 @@ func (d *dwctxt) writelines(unit *sym.CompilationUnit, lineProlog loader.Sym) []
 	// Output the state machine for each function remaining.
 	for _, s := range unit.Textp {
 		fnSym := s
-		_, _, _, lines := d.ldr.GetFuncDwarfAuxSyms(fnSym)
+		_, _, _, lines := d.funcDwarfAux(fnSym)
 
 		// Chain the line symbol onto the list.
 		if lines != 0 {
@@ -1796,10 +1800,16 @@ func (d *dwctxt) assignDebugAddrSlot(unit *sym.CompilationUnit, fnsym loader.Sym
 // subprogram DIE for the function and picks up any other DIEs
 // (absfns, types) that it references.
 func (d *dwctxt) dwarfVisitFunction(fnSym loader.Sym, unit *sym.CompilationUnit) {
+	if buildcfg.Experiment.TangoLLVM {
+		fi := d.ldr.FuncInfo(fnSym)
+		if fi.LLVM() {
+			d.rebuildLLVMDWARF(fnSym, fi)
+		}
+	}
 	// The DWARF subprogram DIE symbol is listed as an aux sym
 	// of the text (fcn) symbol, so ask the loader to retrieve it,
 	// as well as the associated range symbol.
-	infosym, _, rangesym, _ := d.ldr.GetFuncDwarfAuxSyms(fnSym)
+	infosym, _, rangesym, _ := d.funcDwarfAux(fnSym)
 	if infosym == 0 {
 		return
 	}
@@ -2148,7 +2158,7 @@ func (d *dwctxt) writedebugaddr(unit *sym.CompilationUnit, debugaddr loader.Sym)
 		fnSym := s
 		// NB: this looks at SDWARFFCN; it will need to also look
 		// at range and loc when they get there.
-		infosym, locsym, rangessym, _ := d.ldr.GetFuncDwarfAuxSyms(fnSym)
+		infosym, locsym, rangessym, _ := d.funcDwarfAux(fnSym)
 
 		// Walk the relocations of the various DWARF symbols to
 		// collect relocations corresponding to indirect function

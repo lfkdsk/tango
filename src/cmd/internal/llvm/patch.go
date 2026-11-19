@@ -8,6 +8,7 @@ package llvm
 
 import (
 	"bytes"
+	"cmd/internal/goobj"
 	"cmd/internal/obj"
 	"cmd/internal/objabi"
 	"encoding/binary"
@@ -189,9 +190,9 @@ func (p *patcher) Auxs(hostname string) []*TargetSymbol {
 	argsmapsym := p.Symbol(hostname + "..argspointermaps")
 	localsmapsym := p.Symbol(hostname + "..localspointermaps")
 	pcspsym := p.Symbol(hostname + "..pcsp")
-	pcfilesym := p.Symbol(hostname + "..pcfile")
-	pclinesym := p.Symbol(hostname + "..pcline")
-	pcinlinesym := p.Symbol(hostname + "..pcinline")
+	pcfilesym := p.sourcePCSymbol(hostname, "pcfile")
+	pclinesym := p.sourcePCSymbol(hostname, "pcline")
+	pcinlinesym := p.sourcePCSymbol(hostname, "pcinline")
 	pcstackmapindexsym := p.Symbol(hostname + "..pcstackmapindex")
 	pcunsafesym := p.Symbol(hostname + "..pcunsafepoint")
 	/*
@@ -280,6 +281,10 @@ func (p *patcher) patchText(pctxt PatchContext, tsym TargetSym, tsymbol *TargetS
 	pctxt.PatchSymbol(tsym, tsymbol)
 
 	funcinfosym := p.EnsureSymbol(hostname + "..funcinfo")
+	// The OSS LLVM backend supports x86, where MinLC is 1.
+	pcinline := p.sourcePCData(hostname, "pcinline", 1)
+	normalizeInlineParentPCs(funcinfosym.P, pcinline, 1)
+	goobj.MarkLLVMFuncInfo(funcinfosym.P)
 	pctxt.PatchFuncInfo(tsym, funcinfosym)
 
 	/*
@@ -298,9 +303,9 @@ func (p *patcher) patchText(pctxt PatchContext, tsym TargetSym, tsymbol *TargetS
 	}
 
 	pcspsym := p.Symbol(hostname + "..pcsp")
-	pcfilesym := p.Symbol(hostname + "..pcfile")
-	pclinesym := p.Symbol(hostname + "..pcline")
-	pcinlinesym := p.Symbol(hostname + "..pcinline")
+	pcfilesym := p.sourcePCData(hostname, "pcfile", 1)
+	pclinesym := p.sourcePCData(hostname, "pcline", 1)
+	pcinlinesym := pcinline
 	pcstackmapindexsym := p.Symbol(hostname + "..pcstackmapindex")
 	arginfo := p.Symbol(hostname + "..arginfo1")
 	arglive := p.Symbol(hostname + "..argliveinfo")

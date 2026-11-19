@@ -476,3 +476,7 @@ func (x lico) lineNumberHTML() string {
 func (x lico) atColumn1() lico {
 	return makeLico(x.Line(), 1).withIsStmt()
 }
+
+// SetFileIndex supplies the file index for a position reconstructed in the
+// linker from a finalized compilation unit's file table.
+func (b *PosBase) SetFileIndex(index int) { b.fileIndex = index }

@@ -54,6 +54,14 @@ func (a *FuncInfo) Write(w *bytes.Buffer) {
 	}
 }
 
+// MarkLLVMFuncInfo records that the PC tables came from LLVM. This byte
+// is zero in objects produced by the Go assembler and the native backend.
+func MarkLLVMFuncInfo(data []byte) {
+	data[10] = 1
+}
+
+func (*FuncInfo) ReadLLVM(data []byte) bool { return data[10] == 1 }
+
 // FuncInfoLengths is a cache containing a roadmap of offsets and
 // lengths for things within a serialized FuncInfo. Each length field
 // stores the number of items (e.g. files, inltree nodes, etc), and the
@@ -142,4 +150,11 @@ func (inl *InlTreeNode) Read(b []byte) []byte {
 	inl.Func = SymRef{readUint32(), readUint32()}
 	inl.ParentPC = int32(readUint32())
 	return b
+}
+
+// SetInlTreeParentPC updates the resolved parent PC without changing the
+// symbol references in the inline tree.
+func (*FuncInfo) SetInlTreeParentPC(data []byte, offset, index, pc uint32) {
+	const size = 6 * 4
+	binary.LittleEndian.PutUint32(data[offset+index*size+5*4:], pc)
 }

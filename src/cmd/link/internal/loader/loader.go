@@ -2336,6 +2336,10 @@ type InlTreeNode struct {
 	ParentPC int32
 }
 
+func (fi *FuncInfo) LLVM() bool {
+	return fi.Valid() && (*goobj.FuncInfo)(nil).ReadLLVM(fi.data)
+}
+
 func (fi *FuncInfo) NumInlTree() uint32 {
 	if !fi.lengths.Initialized {
 		panic("need to call Preload first")

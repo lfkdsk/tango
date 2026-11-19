@@ -103,7 +103,8 @@ type Link struct {
 	tramps []loader.Sym // trampolines
 
 	compUnits []*sym.CompilationUnit // DWARF compilation units
-	runtimeCU *sym.CompilationUnit   // One of the runtime CUs, the last one seen.
+	llvmDwarf map[loader.Sym]llvmDwarfAux
+	runtimeCU *sym.CompilationUnit // One of the runtime CUs, the last one seen.
 
 	loader  *loader.Loader
 	cgodata []cgodata // cgo directives to load, three strings are args for loadcgo
