@@ -18,8 +18,10 @@ import (
 	"runtime"
 	"strings"
 	"sync"
+	"syscall"
 	"tango/runtimex"
 	"testing"
+	"time"
 )
 
 type GoidPkg struct {
@@ -225,31 +227,95 @@ func TestGetGoId(t *testing.T) {
 // Second, the program terminates iff when the main goroutine terminates, making sure that
 // the infinite loop can be preempted, i.e., only instructions that obtain the pid are marked
 // as unsafe to be preempted rather than the whole function.
+//
+// The number of spinning goroutines is deliberately kept equal to GOMAXPROCS rather than a
+// fixed few thousand, and each spinner reports readiness before entering its loop. The main
+// goroutine waits until every P is confirmed held by an infinite loop, so the run queues stay
+// shallow and the program measures asynchronous preemption directly: once all Ps are
+// saturated, the main goroutine can only be scheduled back in if a spinner is preempted. The
+// older design spawned thousands of goroutines, which could delay the main goroutine for
+// minutes behind the global run queue even when preemption was working correctly.
 func genGoIdAsyncPreemptionMain(dir, pkg string) {
 	path := path.Join(dir, main)
 	source := `package main
 
 import (
 	pid "%s"
+	"runtime"
+	"sync/atomic"
 )
 
 const length = 1024
-const Gs = 5 * 1000
 
 var pids [length]int
+var ready int32
 
 func main() {
-	for i := 0; i < Gs; i++ {
+	n := runtime.GOMAXPROCS(0)
+	for i := 0; i < n; i++ {
 		i := i
 		go func() {
+			// Report readiness only once this goroutine is actually running.
+			atomic.AddInt32(&ready, 1)
+			// The only call in the loop is the leaf pid.GetPid (intrinsic
+			// runtime.getPId), which has no stack-growth preemption check.
 			for {
 				pids[i%%length] = pid.GetPid()
 			}
 		}()
 	}
+
+	// Wait until every P is held by a goroutine spinning forever.
+	for atomic.LoadInt32(&ready) < int32(n) {
+		runtime.Gosched()
+	}
+
+	// All Ps are saturated by infinite loops, so this finite work can only run
+	// once a spinner is asynchronously preempted.
+	x := 0
+	for i := 0; i < 100; i++ {
+		for j := 0; j < 1000000; j++ {
+			x += j
+		}
+	}
+	if x < 0 {
+		panic("unreachable")
+	}
 }
 `
 	writeFile(path, []byte(fmt.Sprintf(source, pkg)))
+}
+
+// runGoIdAsyncPreemptionChild runs the generated child program in its own process group and
+// waits at most waitFor. It returns whether the program exited on its own (true) before the
+// timeout, along with the captured output. The whole process group is always reaped.
+func runGoIdAsyncPreemptionChild(t *testing.T, dir string, extraEnv []string, waitFor time.Duration) (bool, string) {
+	cmd := exec.Command(testenv.GoToolPath(t), "run", "-opt=beast", main)
+	cmd.Dir = dir
+	cmd.Env = append(genEnv(dir), extraEnv...)
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+
+	var buf strings.Builder
+	cmd.Stdout = &buf
+	cmd.Stderr = &buf
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("failed to start child program: %v\n%s", err, buf.String())
+	}
+
+	timedOut := false
+	timer := time.AfterFunc(waitFor, func() {
+		timedOut = true
+		// Negative pid targets the whole group so the compiled binary as well as
+		// the `go run` parent are reaped.
+		_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+	})
+	err := cmd.Wait()
+	timer.Stop()
+	if !timedOut && err != nil {
+		_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+		return false, buf.String()
+	}
+	return !timedOut, buf.String()
 }
 
 func TestGoIdAsyncPreemption(t *testing.T) {
@@ -268,21 +334,31 @@ func TestGoIdAsyncPreemption(t *testing.T) {
 	cmd := exec.Command(testenv.GoToolPath(t), "mod", "download", p.pkg)
 	cmd.Env = env
 	cmd.Dir = dir
-	out, err := cmd.CombinedOutput()
-	if err != nil {
+	if _, err := cmd.CombinedOutput(); err != nil {
 		t.Skip("TestGetGoId() is skipped due to the network issue.")
 	}
 	filepath.WalkDir(dir, func(path string, d os.DirEntry, err error) error {
 		return os.Chmod(path, 0777)
 	})
 
-	// 2. Run
-	cmd = exec.Command(testenv.GoToolPath(t), "run", "-opt=beast", main)
-	cmd.Env = env
-	cmd.Dir = dir
-	out, err = cmd.CombinedOutput()
-	if err != nil {
-		log.Fatal(string(out))
+	// Pin GOMAXPROCS so the child spawns a small, deterministic number of spinners
+	// regardless of the host's CPU count.
+	childEnv := []string{"GOMAXPROCS=4"}
+
+	// 2. Positive case: asynchronous preemption enabled. The spinners must be
+	// preempted so the main goroutine finishes and the process exits promptly.
+	if exited, childOut := runGoIdAsyncPreemptionChild(t, dir, childEnv, 30*time.Second); !exited {
+		t.Fatalf("child program failed to exit even though async preemption is enabled\n%s", childOut)
+	}
+
+	// 3. Negative control: with asynchronous preemption disabled the saturated
+	// spinners have no way to yield (the loop's only call is a leaf with no
+	// stack-growth check), so the main goroutine can never be scheduled back in.
+	// The child must still be running after the observation window. Together with
+	// the positive case this proves the program genuinely requires preemption.
+	negEnv := append(append([]string{}, childEnv...), "GODEBUG=asyncpreemptoff=1")
+	if exited, childOut := runGoIdAsyncPreemptionChild(t, dir, negEnv, 5*time.Second); exited {
+		t.Fatalf("child exited with asyncpreemptoff=1; the test no longer requires preemption\n%s", childOut)
 	}
 }
 
