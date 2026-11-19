@@ -1,3 +1,5 @@
+//go:build goexperiment.tangollvm && linux && amd64 && cgo && !compiler_bootstrap
+
 package llvm
 
 import (
