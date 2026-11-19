@@ -23,6 +23,7 @@ import (
 	"cmd/compile/internal/typecheck"
 	"cmd/internal/obj"
 	"cmd/internal/objabi"
+	"container/heap"
 	"debug/dwarf"
 	"fmt"
 	"internal/buildcfg"
@@ -1345,80 +1346,7 @@ func (b *builder) createBlock(block *ssa.Block, llvmBlock llvm.BasicBlock) {
 		fmt.Fprintf(os.Stderr, "%s: %s\n", b.functag, llvmBlock.Name())
 	}
 	b.SetInsertPointAtEnd(llvmBlock)
-	created := make(map[*ssa.Value]bool)
-	n := 0
-
-	// topological sort
-	indegree := make(map[*ssa.Value]int)
-	uses := make(map[*ssa.Value][]*ssa.Value)
-	memdefCount := make(map[*ssa.Value]int)
-	// compute indegree for all Values
-	for _, v := range block.Values {
-		for _, w := range v.Args {
-			if w != nil && w.Block == block {
-				indegree[v]++
-				uses[w] = append(uses[w], v)
-			}
-		}
-		if u := b.memUse(v); u != nil {
-			memdefCount[u]++
-		}
-		if v.Type.IsMemory() {
-			// v must NOT be a def that is Phi, InitMem or depends on some value in previous blocks
-			memdefCount[v]++
-		}
-	}
-
-	// create phi nodes first
-	for _, v := range block.Values {
-		if v.Op != ssa.OpPhi {
-			continue
-		}
-		if v.Type.IsMemory() {
-			// v must NOT be a def that is Phi, InitMem or depends on some value in previous blocks
-			memdefCount[v]--
-		}
-		b.createInstruction(v)
-		created[v] = true
-		n++
-		for _, u := range uses[v] {
-			indegree[u]--
-		}
-	}
-
-	// go over Values in original order, and create the corresponding LLVM
-	// instruction whenever its indegree is zero; update the indegree of the uses
-	// along the way
-	for n < len(block.Values) {
-		for _, v := range block.Values {
-			if _, ok := created[v]; ok {
-				continue
-			}
-			if indegree[v] > 0 {
-				continue
-			}
-			u, d := b.memUse(v), b.memDef(v)
-			if u != nil {
-				if d != nil && memdefCount[u] > 1 {
-					// a use with def, must wait all sibling usage are done.
-					// otherwise the def will override its use.
-					continue
-				}
-				// a use without def, simply decrease usecount
-				memdefCount[u]--
-			}
-			if d != nil {
-				memdefCount[d]--
-			}
-			b.createInstruction(v)
-			created[v] = true
-			n++
-			for _, u := range uses[v] {
-				indegree[u]--
-			}
-			break // important: this makes topo-sort stable
-		}
-	}
+	b.createBlockInstructions(block)
 
 	switch block.Kind {
 	case ssa.BlockFirst, ssa.BlockPlain:
@@ -1517,6 +1445,114 @@ func (b *builder) createBlock(block *ssa.Block, llvmBlock llvm.BasicBlock) {
 		}
 	default:
 		base.FatalfAt(block.Pos, "unsupported BlockKind: %v", block.Kind)
+	}
+}
+
+type llvmBlockInstruction struct {
+	index    int
+	indegree int
+}
+
+type llvmReadyHeap []*llvmBlockInstruction
+
+func (h llvmReadyHeap) Len() int           { return len(h) }
+func (h llvmReadyHeap) Less(i, j int) bool { return h[i].index < h[j].index }
+func (h llvmReadyHeap) Swap(i, j int)      { h[i], h[j] = h[j], h[i] }
+func (h *llvmReadyHeap) Push(x any)        { *h = append(*h, x.(*llvmBlockInstruction)) }
+func (h *llvmReadyHeap) Pop() any {
+	last := len(*h) - 1
+	inst := (*h)[last]
+	*h = (*h)[:last]
+	return inst
+}
+
+func (b *builder) createBlockInstructions(block *ssa.Block) {
+	values := block.Values
+	instructions := make([]llvmBlockInstruction, len(values))
+	users := make(map[*ssa.Value][]*llvmBlockInstruction)
+	memoryUses := make(map[*ssa.Value]int)
+	for i, v := range values {
+		inst := &instructions[i]
+		inst.index = i
+		for _, arg := range v.Args {
+			if arg != nil && arg.Block == block {
+				inst.indegree++
+				users[arg] = append(users[arg], inst)
+			}
+		}
+		if mem := b.memUse(v); mem != nil {
+			memoryUses[mem]++
+		}
+		if v.Type.IsMemory() {
+			// Count the definition until the memory value is emitted.
+			memoryUses[v]++
+		}
+	}
+
+	remaining := len(values)
+	// PHIs precede their users even when back edges refer to this block.
+	for _, v := range values {
+		if v.Op != ssa.OpPhi {
+			continue
+		}
+		if v.Type.IsMemory() {
+			memoryUses[v]--
+		}
+		b.createInstruction(v)
+		remaining--
+		for _, user := range users[v] {
+			user.indegree--
+		}
+	}
+
+	ready := make(llvmReadyHeap, 0, remaining)
+	waiting := make(map[*ssa.Value][]*llvmBlockInstruction)
+	enqueue := func(inst *llvmBlockInstruction) {
+		v := values[inst.index]
+		if v.Type.IsMemory() {
+			// A writer waits until all other users of its input memory have emitted.
+			if mem := b.memUse(v); mem != nil && memoryUses[mem] > 1 {
+				waiting[mem] = append(waiting[mem], inst)
+				return
+			}
+		}
+		heap.Push(&ready, inst)
+	}
+	for i, v := range values {
+		if v.Op != ssa.OpPhi && instructions[i].indegree == 0 {
+			enqueue(&instructions[i])
+		}
+	}
+
+	releaseMemory := func(mem *ssa.Value) {
+		memoryUses[mem]--
+		if memoryUses[mem] == 1 {
+			for _, inst := range waiting[mem] {
+				heap.Push(&ready, inst)
+			}
+			delete(waiting, mem)
+		}
+	}
+	for remaining > 0 {
+		if len(ready) == 0 {
+			base.FatalfAt(block.Pos, "cannot schedule LLVM instructions in %s", block)
+		}
+		// Pick the earliest ready instruction in the original SSA value order.
+		v := values[heap.Pop(&ready).(*llvmBlockInstruction).index]
+		if mem := b.memUse(v); mem != nil {
+			releaseMemory(mem)
+		}
+		if v.Type.IsMemory() {
+			releaseMemory(v)
+		}
+		b.createInstruction(v)
+		remaining--
+		for _, user := range users[v] {
+			user.indegree--
+			if user.indegree == 0 && values[user.index].Op != ssa.OpPhi {
+				enqueue(user)
+			}
+		}
 	}
 }
 
