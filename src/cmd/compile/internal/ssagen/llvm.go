@@ -442,6 +442,21 @@ func (c *compilerContext) summaryOut() {
 	fmt.Println("[LLVM] Inlined Func Number", su.inlinedFunc)
 }
 
+// preserveLTOSplit marks the functions whose assembled Go bodies require
+// a stack check. LLVM may eliminate the last call, but the linker patches
+// the body only when its NoSplit attribute agrees with the Go symbol.
+func (c *compilerContext) preserveLTOSplit() {
+	for _, sym := range base.Ctxt.Text {
+		if sym.NoSplit() {
+			continue
+		}
+		fn := c.mod.NamedFunction(c.getGoFunctionLLVMName(sym))
+		if !fn.IsNil() && !fn.IsDeclaration() {
+			fn.AddFunctionAttr(c.ctx.CreateStringAttribute("go-preserve-split", "true"))
+		}
+	}
+}
+
 // Compile the LLVM module and emit object file.
 func (c *compilerContext) complete() {
 	if c.mod.FirstFunction().IsNil() {
@@ -485,6 +500,7 @@ func (c *compilerContext) complete() {
 		if c.moduleName == "runtime" {
 			return
 		}
+		c.preserveLTOSplit()
 		m := c.mod
 		m = eraseDupOk(m, c.dupokFunc)
 		c.writeLLVMModule("export", m)
