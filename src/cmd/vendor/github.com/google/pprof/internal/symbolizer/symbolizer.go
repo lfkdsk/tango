@@ -123,6 +123,20 @@ func statusCodeError(resp *http.Response) error {
 	return fmt.Errorf("server response: %s", resp.Status)
 }
 
+// A binary lookup can fill gaps in a mapping. Keep inline frames that the
+// runtime already supplied, since the local object reader may only know the
+// physical function at that address.
+func hasLocationFrames(loc *profile.Location) bool {
+	if len(loc.Line) > 1 {
+		return true
+	}
+	if len(loc.Line) == 0 {
+		return false
+	}
+	line := loc.Line[0]
+	return line.Function != nil && line.Function.Name != "" && line.Line > 0
+}
+
 // doLocalSymbolize adds symbol and line number information to all locations
 // in a profile. mode enables some options to control
 // symbolization.
@@ -193,7 +207,7 @@ func doLocalSymbolize(prof *profile.Profile, fast, force bool, obj plugin.ObjToo
 			f.Close()
 			continue
 		}
-		symbolizeOneMapping(m, locs, f, addFunction)
+		symbolizeOneMapping(m, locs, f, addFunction, force)
 		f.Close()
 	}
 
@@ -204,8 +218,11 @@ func doLocalSymbolize(prof *profile.Profile, fast, force bool, obj plugin.ObjToo
 	return nil
 }
 
-func symbolizeOneMapping(m *profile.Mapping, locs []*profile.Location, obj plugin.ObjFile, addFunction func(*profile.Function) *profile.Function) {
+func symbolizeOneMapping(m *profile.Mapping, locs []*profile.Location, obj plugin.ObjFile, addFunction func(*profile.Function) *profile.Function, force bool) {
 	for _, l := range locs {
+		if !force && hasLocationFrames(l) {
+			continue
+		}
 		stack, err := obj.SourceLine(l.Address)
 		if err != nil || len(stack) == 0 {
 			// No answers from addr2line.
