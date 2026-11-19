@@ -174,23 +174,22 @@ func (l *ldPatchContext) patchPCData(f loader.Sym, id int, pcdata []loader.Sym, 
 		panic(fmt.Errorf("mismatched data size for %s, Size=%d, len(P)=%d", ldr.SymName(f), size, len(v.P)))
 	}
 
-	if id >= len(pcdata) {
-		panic("size should gen at object stage")
+	// The replacement can introduce PC data absent from the original body.
+	pcdata = ldr.EnsurePCOrFuncdata(f, goobj.AuxPcdata, pcdata, id)
+	var item loader.Sym
+	if pcdata[id] == 0 {
+		nsb := ldr.MakeSymbolBuilder("")
+		nsb.SetType(sym.SRODATA)
+		item = nsb.Sym()
 	} else {
-		if pcdata[id] == 0 {
-			panic(fmt.Sprintf("pcdata[%d] is empty.", id))
-		}
-
-		// Create new symbol and update the function's PCDATA auxiliary table
-		item := ldr.GenAndCopyNewSym(pcdata[id])
-		pcdata[id] = item
-		var tmp [8]*goobj.Aux
-		pcauxs := ldr.DataAuxs(f, goobj.AuxPcdata, tmp[:])
-		pcauxs[id].SetSym(goobj.SymRef{PkgIdx: uint32(0), SymIdx: uint32(item)})
-
-		debugPrint(2, "Patch pcdata ", pcId2Name(id), item, v)
-		l.patchSymbol(pcdata[id], v)
+		item = ldr.GenAndCopyNewSym(pcdata[id])
 	}
+	l.patchSymbol(item, v)
+
+	var tmp [8]*goobj.Aux
+	pcauxs := ldr.DataAuxs(f, goobj.AuxPcdata, tmp[:])
+	pcauxs[id].SetSym(goobj.SymRef{SymIdx: uint32(item)})
+	debugPrint(2, "Patch pcdata ", pcId2Name(id), item, v)
 }
 
 // removePCData effectively removes a PCDATA entry by setting it to empty data.
