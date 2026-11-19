@@ -466,69 +466,17 @@ func (state *pclntab) generateFilenameTabs(ctxt *Link, compUnits []*sym.Compilat
 	return cuOffsets
 }
 
-// generatePctab creates the runtime.pctab variable, holding all the
-// deduplicated pcdata.
-func (state *pclntab) generatePctab(ctxt *Link, funcs []loader.Sym) {
-	ldr := ctxt.loader
-
-	// Pctab offsets of 0 are considered invalid in the runtime. We respect
-	// that by just padding a single byte at the beginning of runtime.pctab,
-	// that way no real offsets can be zero.
-	size := int64(1)
-
-	// Walk the functions, finding offset to store each pcdata.
-	seen := make(map[loader.Sym]struct{})
-	saveOffset := func(pcSym loader.Sym) {
-		if pcSym == 0 {
-			return
-		}
-		if _, ok := seen[pcSym]; !ok {
-			datSize := ldr.SymSize(pcSym)
-			if datSize != 0 {
-				ldr.SetSymValue(pcSym, size)
-			} else {
-				// Invalid PC data, record as zero.
-				ldr.SetSymValue(pcSym, 0)
-			}
-			size += datSize
-			seen[pcSym] = struct{}{}
-		}
-	}
-	var pcsp, pcline, pcfile, pcinline loader.Sym
-	var pcdata []loader.Sym
-	for _, s := range funcs {
-		fi := ldr.FuncInfo(s)
-		if !fi.Valid() {
-			continue
-		}
-		fi.Preload()
-		pcsp, pcfile, pcline, pcinline, pcdata = ldr.PcdataAuxs(s, pcdata)
-
-		pcSyms := []loader.Sym{pcsp, pcfile, pcline}
-		for _, pcSym := range pcSyms {
-			saveOffset(pcSym)
-		}
-		for _, pcSym := range pcdata {
-			saveOffset(pcSym)
-		}
-		if fi.NumInlTree() > 0 {
-			saveOffset(pcinline)
-		}
-	}
-
-	// TODO: There is no reason we need a generator for this variable, and it
-	// could be moved to a carrier symbol. However, carrier symbols containing
-	// carrier symbols don't work yet (as of Aug 2020). Once this is fixed,
-	// runtime.pctab could just be a carrier sym.
+// generatePctab assigns the final offsets used by the runtime's PC tables.
+func (state *pclntab) generatePctab(ctxt *Link, funcs []loader.Sym) pclnPCData {
+	pcs, table := collectPCData(ctxt, funcs, ctxt.loader.SymSize(state.filetab))
 	writePctab := func(ctxt *Link, s loader.Sym) {
-		ldr := ctxt.loader
-		sb := ldr.MakeSymbolUpdater(s)
-		for sym := range seen {
-			sb.SetBytesAt(ldr.SymValue(sym), ldr.Data(sym))
+		sb := ctxt.loader.MakeSymbolUpdater(s)
+		for _, entry := range table.entries {
+			sb.SetBytesAt(int64(entry.offset), entry.data)
 		}
 	}
-
-	state.pctab = state.addGeneratedSym(ctxt, "runtime.pctab", size, 1, writePctab)
+	state.pctab = state.addGeneratedSym(ctxt, "runtime.pctab", table.size, 1, writePctab)
+	return pcs
 }
 
 // generateFuncdata writes out the funcdata information.
@@ -682,36 +630,21 @@ func ignoreFuncData(ldr *loader.Loader, s loader.Sym, j int, fdSym loader.Sym) b
 	return false
 }
 
-// numPCData returns the number of PCData syms for the FuncInfo.
-// NB: Preload must be called on valid FuncInfos before calling this function.
-func numPCData(ldr *loader.Loader, s loader.Sym, fi loader.FuncInfo) uint32 {
-	if !fi.Valid() {
-		return 0
-	}
-	numPCData := uint32(ldr.NumPcdata(s))
-	if fi.NumInlTree() > 0 {
-		if numPCData < abi.PCDATA_InlTreeIndex+1 {
-			numPCData = abi.PCDATA_InlTreeIndex + 1
-		}
-	}
-	return numPCData
-}
-
 // generateFunctab creates the runtime.functab
 //
 // runtime.functab contains two things:
 //
 //   - pc->func look up table.
 //   - array of func objects, interleaved with pcdata and funcdata
-func (state *pclntab) generateFunctab(ctxt *Link, funcs []loader.Sym, inlSyms map[loader.Sym]loader.Sym, cuOffsets []uint32, nameOffsets map[loader.Sym]uint32) {
+func (state *pclntab) generateFunctab(ctxt *Link, funcs []loader.Sym, inlSyms map[loader.Sym]loader.Sym, cuOffsets []uint32, nameOffsets map[loader.Sym]uint32, pcs pclnPCData) {
 	// Calculate the size of the table.
-	size, startLocations := state.calculateFunctabSize(ctxt, funcs)
+	size, startLocations := state.calculateFunctabSize(ctxt, funcs, pcs)
 	writePcln := func(ctxt *Link, s loader.Sym) {
 		ldr := ctxt.loader
 		sb := ldr.MakeSymbolUpdater(s)
 		// Write the data.
 		writePCToFunc(ctxt, sb, funcs, startLocations)
-		writeFuncs(ctxt, sb, funcs, inlSyms, startLocations, cuOffsets, nameOffsets)
+		writeFuncs(ctxt, sb, funcs, inlSyms, startLocations, cuOffsets, nameOffsets, pcs)
 	}
 	state.pclntab = state.addGeneratedSym(ctxt, "runtime.functab", size, 4, writePcln)
 }
@@ -739,7 +672,7 @@ func funcData(ldr *loader.Loader, s loader.Sym, fi loader.FuncInfo, inlSym loade
 
 // calculateFunctabSize calculates the size of the pclntab, and the offsets in
 // the output buffer for individual func entries.
-func (state pclntab) calculateFunctabSize(ctxt *Link, funcs []loader.Sym) (int64, []uint32) {
+func (state pclntab) calculateFunctabSize(ctxt *Link, funcs []loader.Sym, pcs pclnPCData) (int64, []uint32) {
 	ldr := ctxt.loader
 	startLocations := make([]uint32, len(funcs))
 
@@ -763,7 +696,7 @@ func (state pclntab) calculateFunctabSize(ctxt *Link, funcs []loader.Sym) (int64
 					numFuncData = abi.FUNCDATA_InlTree + 1
 				}
 			}
-			size += int64(numPCData(ldr, s, fi) * 4)
+			size += int64(pcs.funcs[i].end-pcs.funcs[i].start) * 4
 			size += int64(numFuncData * 4)
 		}
 	}
@@ -817,21 +750,20 @@ func writePCToFunc(ctxt *Link, sb *loader.SymbolBuilder, funcs []loader.Sym, sta
 }
 
 // writeFuncs writes the func structures and pcdata to runtime.functab.
-func writeFuncs(ctxt *Link, sb *loader.SymbolBuilder, funcs []loader.Sym, inlSyms map[loader.Sym]loader.Sym, startLocations, cuOffsets []uint32, nameOffsets map[loader.Sym]uint32) {
+func writeFuncs(ctxt *Link, sb *loader.SymbolBuilder, funcs []loader.Sym, inlSyms map[loader.Sym]loader.Sym, startLocations, cuOffsets []uint32, nameOffsets map[loader.Sym]uint32, pcs pclnPCData) {
 	ldr := ctxt.loader
 	deferReturnSym := ldr.Lookup("runtime.deferreturn", abiInternalVer)
 	textStart := ldr.SymValue(ldr.Lookup("runtime.text", 0))
 	funcdata := []loader.Sym{}
-	var pcsp, pcfile, pcline, pcinline loader.Sym
-	var pcdata []loader.Sym
 
 	// Write the individual func objects (runtime._func struct).
 	for i, s := range funcs {
+		pc := pcs.funcs[i]
+		pcdata := pcs.extra[pc.start:pc.end]
 		startLine := int32(0)
 		fi := ldr.FuncInfo(s)
 		if fi.Valid() {
 			fi.Preload()
-			pcsp, pcfile, pcline, pcinline, pcdata = ldr.PcdataAuxs(s, pcdata)
 			startLine = fi.StartLine()
 		}
 
@@ -860,19 +792,15 @@ func writeFuncs(ctxt *Link, sb *loader.SymbolBuilder, funcs []loader.Sym, inlSym
 		off = sb.SetUint32(ctxt.Arch, off, deferreturn)
 
 		// pcdata
-		if fi.Valid() {
-			off = sb.SetUint32(ctxt.Arch, off, uint32(ldr.SymValue(pcsp)))
-			off = sb.SetUint32(ctxt.Arch, off, uint32(ldr.SymValue(pcfile)))
-			off = sb.SetUint32(ctxt.Arch, off, uint32(ldr.SymValue(pcline)))
-		} else {
-			off += 12
-		}
-		off = sb.SetUint32(ctxt.Arch, off, numPCData(ldr, s, fi))
+		off = sb.SetUint32(ctxt.Arch, off, pc.pcsp)
+		off = sb.SetUint32(ctxt.Arch, off, pc.pcfile)
+		off = sb.SetUint32(ctxt.Arch, off, pc.pcline)
+		off = sb.SetUint32(ctxt.Arch, off, uint32(len(pcdata)))
 
 		// Store the offset to compilation unit's file table.
 		cuIdx := ^uint32(0)
 		if cu := ldr.SymUnit(s); cu != nil {
-			cuIdx = cuOffsets[cu.PclnIndex]
+			cuIdx = cuOffsets[cu.PclnIndex] + pc.fileBase
 		}
 		off = sb.SetUint32(ctxt.Arch, off, cuIdx)
 
@@ -900,19 +828,13 @@ func writeFuncs(ctxt *Link, sb *loader.SymbolBuilder, funcs []loader.Sym, inlSym
 		off = sb.SetUint8(ctxt.Arch, off, uint8(len(funcdata)))
 
 		// Output the pcdata.
-		if fi.Valid() {
-			for j, pcSym := range pcdata {
-				sb.SetUint32(ctxt.Arch, off+int64(j*4), uint32(ldr.SymValue(pcSym)))
-			}
-			if fi.NumInlTree() > 0 {
-				sb.SetUint32(ctxt.Arch, off+abi.PCDATA_InlTreeIndex*4, uint32(ldr.SymValue(pcinline)))
-			}
+		for _, pcOff := range pcdata {
+			off = sb.SetUint32(ctxt.Arch, off, pcOff)
 		}
 
 		// Write funcdata refs as offsets from go:func.* and go:funcrel.*.
 		funcdata = funcData(ldr, s, fi, inlSyms[s], funcdata)
 		// Missing funcdata will be ^0. See runtime/symtab.go:funcdata.
-		off = int64(startLocations[i] + funcSize + numPCData(ldr, s, fi)*4)
 		for j := range funcdata {
 			dataoff := off + int64(4*j)
 			fdsym := funcdata[j]
@@ -984,9 +906,9 @@ func (ctxt *Link) pclntab(container loader.Bitmap) *pclntab {
 	state.generatePCHeader(ctxt)
 	nameOffsets := state.generateFuncnametab(ctxt, funcs)
 	cuOffsets := state.generateFilenameTabs(ctxt, compUnits, funcs)
-	state.generatePctab(ctxt, funcs)
+	pcs := state.generatePctab(ctxt, funcs)
 	inlSyms := makeInlSyms(ctxt, funcs, nameOffsets)
-	state.generateFunctab(ctxt, funcs, inlSyms, cuOffsets, nameOffsets)
+	state.generateFunctab(ctxt, funcs, inlSyms, cuOffsets, nameOffsets, pcs)
 	state.generateFuncdata(ctxt, funcs, inlSyms)
 
 	return state
