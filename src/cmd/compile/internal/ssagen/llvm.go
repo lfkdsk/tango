@@ -1580,6 +1580,12 @@ func tailCallABICompatible(caller, callee *ssa.AuxCall) bool {
 func (b *builder) checkFeasibility() string {
 	curfn := b.curfn()
 
+	// Go assembly marks calls to outlined global map initializers weak.
+	// Keep the package init on that path so the linker can prune unused maps.
+	if curfn.IsPackageInit() && base.Debug.WrapGlobalMapCtl != 1 && len(globalMapInitLsyms) != 0 {
+		return "preserve weak map initializer calls"
+	}
+
 	// The backend uses calls to this symbol as liveness markers.
 	if curfn.LSym.Name == "runtime.KeepAlive" {
 		return "keep runtime.KeepAlive opaque"
