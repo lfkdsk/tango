@@ -943,7 +943,7 @@ func init() {
 				os.Exit(0)
 			}
 		}()
-		runtime.PanicForTesting(nil, 1)
+		runtime.PanicForTesting(-1)
 		// We expect to crash, so exit 0 to indicate failure.
 		os.Exit(0)
 	}
@@ -960,17 +960,17 @@ func init() {
 }
 
 func TestRuntimePanic(t *testing.T) {
-	if testenv.IsBeastModeEnabled() {
-		t.Skip("skipped as the bound check eliminated in runtime")
-	}
 	cmd := testenv.CleanCmdEnv(exec.Command(testenv.Executable(t), "-test.run=^TestRuntimePanic$"))
 	cmd.Env = append(cmd.Env, "GO_TEST_RUNTIME_PANIC=1")
 	out, err := cmd.CombinedOutput()
 	t.Logf("%s", out)
 	if err == nil {
-		t.Error("child process did not fail")
-	} else if want := "runtime.unexportedPanicForTesting"; !bytes.Contains(out, []byte(want)) {
-		t.Errorf("output did not contain expected string %q", want)
+		t.Fatal("child process did not fail")
+	}
+	for _, want := range []string{"fatal error: negative shift amount\n", "runtime.unexportedPanicForTesting"} {
+		if !bytes.Contains(out, []byte(want)) {
+			t.Errorf("output did not contain expected string %q", want)
+		}
 	}
 }
 

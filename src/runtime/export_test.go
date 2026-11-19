@@ -582,13 +582,15 @@ func GIsWaitingOnMutex(gp *G) bool {
 var CasGStatusAlwaysTrack = &casgstatusAlwaysTrack
 
 //go:noinline
-func PanicForTesting(b []byte, i int) byte {
-	return unexportedPanicForTesting(b, i)
+func PanicForTesting(shift int) int {
+	return unexportedPanicForTesting(shift)
 }
 
+// The signed shift check stays active when -beast=bce disables runtime bounds checks.
+//
 //go:noinline
-func unexportedPanicForTesting(b []byte, i int) byte {
-	return b[i]
+func unexportedPanicForTesting(shift int) int {
+	return 1 << shift
 }
 
 func G0StackOverflow() {
