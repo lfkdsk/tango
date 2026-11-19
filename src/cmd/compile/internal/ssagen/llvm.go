@@ -169,10 +169,19 @@ func parseDenylist() {
 	 *   leads to an infinite loop.
 	 */
 	wellKnownDenylist = "runtime.stackOverflow"
+	// The standard backend performs better on contended mutex workloads.
+	wellKnownDenylist += ":internal/sync.(*Mutex).lockSlow"
 	if denylist == nil {
 		denylist = make(map[string]struct{})
 	}
-	stringToMap(denylist, wellKnownDenylist, ":")
+	// An explicit GOLLVMDENYLIST entry still wins when a built-in is disabled.
+	unblocked := make(map[string]struct{})
+	stringToMap(unblocked, os.Getenv("GOLLVMUNBLACKLIST"), ":")
+	for _, name := range strings.Split(wellKnownDenylist, ":") {
+		if _, skip := unblocked[name]; !skip {
+			denylist[name] = struct{}{}
+		}
+	}
 }
 
 func isDenylisted(s string) bool {

@@ -40,6 +40,12 @@ env -u GOROOT GOEXPERIMENT=tangollvm \
   -gcflags='all=-beast=llvm=3,optimize=3,inline=1' ./...
 ```
 
+For per-function comparisons, set `GOLLVMDENYLIST` to colon-separated
+linker symbol names to compile with the standard backend. Set
+`GOLLVMUNBLACKLIST` to skip a built-in function entry, for example
+`internal/sync.(*Mutex).lockSlow`. An explicit denylist entry takes precedence
+over this override. The package denylist is independent.
+
 The SDK defaults to the generated toolchain's `pkg/tangollvm` directory.
 `GOEXPERIMENT=notangollvm` selects its standard compiler and linker.
 Plain Tango continues to build with `src/make.bash` without an LLVM checkout.

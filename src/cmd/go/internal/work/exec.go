@@ -392,6 +392,8 @@ func (b *Builder) buildActionID(a *Action) cache.ActionID {
 			"GOSSAFUNC",
 			"GOSSADIR",
 			"GOCOMPILEDEBUG",
+			"GOLLVMDENYLIST",
+			"GOLLVMUNBLACKLIST",
 		}
 		for _, env := range magic {
 			if x := os.Getenv(env); x != "" {
