@@ -424,7 +424,7 @@ func Main(arch *sys.Arch, theArch Arch) {
 		}
 	}
 	bench.Start("loadlib")
-	ctxt.loadlib()
+	ctxt.loadlib(bench)
 
 	bench.Start("inittasks")
 	ctxt.inittasks()

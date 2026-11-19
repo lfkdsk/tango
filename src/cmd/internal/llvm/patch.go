@@ -7,14 +7,17 @@
 package llvm
 
 import (
+	"bytes"
 	"cmd/internal/obj"
 	"cmd/internal/objabi"
 	"encoding/binary"
 	"fmt"
 	"internal/abi"
+	"io"
 	"iter"
 	"log"
 	"maps"
+	"os"
 	"strings"
 )
 
@@ -143,9 +146,12 @@ func collectMarkerRelocation(pctxt PatchContext, s *TargetSymbol) {
 	}
 }
 
-func extractPatchSymbols(ctxt PatchContext, data []byte) map[string]*TargetSymbol {
-	c1, c2, c3, c4 := data[0], data[1], data[2], data[3]
-	magic := uint32(c1)<<24 | uint32(c2)<<16 | uint32(c3)<<8 | uint32(c4)
+func extractPatchSymbols(ctxt PatchContext, data io.ReaderAt) map[string]*TargetSymbol {
+	var header [4]byte
+	if _, err := data.ReadAt(header[:], 0); err != nil {
+		panic(err)
+	}
+	magic := binary.BigEndian.Uint32(header[:])
 	if magic == 0x7f454c46 { // \x7F E L F
 		return extractSymbolsFromELF(ctxt, data)
 	} else if magic&^1 == 0xfeedface || magic&^0x01000000 == 0xcefaedfe {
@@ -363,9 +369,13 @@ func DecodeFuncNameAndABI(name string) (string, obj.ABI) {
 }
 
 func NewPatcher(pctxt PatchContext, b []byte, verbose int) Patcher {
+	return newPatcher(pctxt, bytes.NewReader(b), verbose)
+}
+
+func newPatcher(pctxt PatchContext, r io.ReaderAt, verbose int) Patcher {
 	p := &patcher{
 		pctxt:   pctxt,
-		symbols: extractPatchSymbols(pctxt, b),
+		symbols: extractPatchSymbols(pctxt, r),
 		verbose: verbose,
 	}
 	pctxt.Init(p)
@@ -396,4 +406,16 @@ func (p *patcher) ApplyPatches() {
 func Patch(pctxt PatchContext, b []byte, verbose int) {
 	p := NewPatcher(pctxt, b, verbose)
 	p.ApplyPatches()
+}
+
+// PatchFile applies the patches from an object without reading the entire
+// object into memory. ELF and Mach-O readers load sections on demand.
+func PatchFile(pctxt PatchContext, path string, verbose int) error {
+	f, err := os.Open(path)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	newPatcher(pctxt, f, verbose).ApplyPatches()
+	return nil
 }

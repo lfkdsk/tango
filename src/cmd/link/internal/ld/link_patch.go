@@ -224,11 +224,13 @@ func (l *ldPatchContext) patchSymbol(s loader.Sym, v *llvm.TargetSymbol) {
 	}
 
 	data := v.P
-	name := ldr.SymName(s)
 
-	// Maps for debugging relocation differences
-	old, new := []string{}, []string{}
-	oldSet, newSet := make(map[string]string, 0), make(map[string]string, 0)
+	var old, new []string
+	var oldSet, newSet map[string]string
+	if printRelocationDiff {
+		oldSet = make(map[string]string)
+		newSet = make(map[string]string)
+	}
 
 	// Step 1: Update symbol data with LLVM-generated content
 	sb := l.makeSymbolUpdater(s)
@@ -240,17 +242,26 @@ func (l *ldPatchContext) patchSymbol(s loader.Sym, v *llvm.TargetSymbol) {
 	sb.SortRelocs()
 	relocs := sb.Relocs()
 
-	debugPrint(2, ldr.SymName(s), "- old")
+	if debug >= 2 {
+		debugPrint(2, ldr.SymName(s), "- old")
+	}
 
 	// Storage for preserving Go-specific relocations
 	var tmp []llvm.TargetReloc
 	// Scan existing relocations and preserve Go-specific ones
 	for i := 0; i < relocs.Count(); i++ {
 		re := relocs.At(i)
-		cul := fmt.Sprintln("\t", ldr.SymName(re.Sym()), re.Off(), re.Siz(), re.Type())
-		old = append(old, cul)
-		oldSet[ldr.SymName(re.Sym())] = cul
-		debugPrint(3, cul)
+		if printOldNewReloacation || printRelocationDiff || debug >= 3 {
+			name := ldr.SymName(re.Sym())
+			line := fmt.Sprintln("\t", name, re.Off(), re.Siz(), re.Type())
+			if printOldNewReloacation {
+				old = append(old, line)
+			}
+			if printRelocationDiff {
+				oldSet[name] = line
+			}
+			debugPrint(3, line)
+		}
 
 		// Preserve specific Go relocation types that LLVM won't generate
 		switch re.Type() {
@@ -285,29 +296,40 @@ func (l *ldPatchContext) patchSymbol(s loader.Sym, v *llvm.TargetSymbol) {
 		re := relocs.At(i)
 		j := &tmp[i]
 		re.Set(j.Off, j.Siz, uint16(j.Type), j.Add, goobj.SymRef{PkgIdx: 0, SymIdx: uint32(l.toLoaderSym(j.Sym))})
-		debugPrint(3, "\t", ldr.SymName(re.Sym()), re.Off(), re.Siz(), re.Type())
+		if debug >= 3 {
+			debugPrint(3, "\t", ldr.SymName(re.Sym()), re.Off(), re.Siz(), re.Type())
+		}
 	}
 
 	// Add new LLVM-generated relocations
 	for i, j := range v.R {
 		re := relocs.At(tmpLen + i)
 		re.Set(j.Off, j.Siz, uint16(j.Type), j.Add, goobj.SymRef{PkgIdx: 0, SymIdx: uint32(l.toLoaderSym(j.Sym))})
-		debugPrint(3, "\t", ldr.SymName(re.Sym()), re.Off(), re.Siz(), re.Type())
+		if debug >= 3 {
+			debugPrint(3, "\t", ldr.SymName(re.Sym()), re.Off(), re.Siz(), re.Type())
+		}
 	}
 
 	// Sort relocations by offset for efficient lookup
 	sb.SortRelocs()
 
-	// Build new relocation map for debugging
-	for i := 0; i < relocs.Count(); i++ {
-		re := relocs.At(i)
-		cul := fmt.Sprintln("\t", ldr.SymName(re.Sym()), re.Off(), re.Siz(), re.Type())
-		new = append(new, cul)
-		newSet[ldr.SymName(re.Sym())] = cul
+	if printOldNewReloacation || printRelocationDiff {
+		for i := 0; i < relocs.Count(); i++ {
+			re := relocs.At(i)
+			name := ldr.SymName(re.Sym())
+			line := fmt.Sprintln("\t", name, re.Off(), re.Siz(), re.Type())
+			if printOldNewReloacation {
+				new = append(new, line)
+			}
+			if printRelocationDiff {
+				newSet[name] = line
+			}
+		}
 	}
 
 	// Debug output for relocation changes
 	if printOldNewReloacation {
+		name := ldr.SymName(s)
 		fmt.Println(name, " -old")
 		fmt.Println(old)
 		fmt.Println(name, " -new")
@@ -320,7 +342,7 @@ func (l *ldPatchContext) patchSymbol(s loader.Sym, v *llvm.TargetSymbol) {
 
 	// Print detailed relocation differences for debugging
 	diff := diffMaps(oldSet, newSet)
-	fmt.Println(name)
+	fmt.Println(ldr.SymName(s))
 	if len(diff.AddedKeys) > 0 {
 		fmt.Println("Add: ")
 		for _, v := range diff.AddedKeys {
@@ -471,7 +493,7 @@ func (l *ldPatchContext) init() {
 	}
 	ldr := l.loader
 	nsym := loader.Sym(ldr.NSym())
-	l.symcache = make(map[loader.Sym]*targetSym, nsym)
+	l.symcache = make(map[loader.Sym]*targetSym)
 	l.localFileTable = make(map[*sym.CompilationUnit]map[string]int, len(l.LibraryByPkg))
 
 	l.nametab = make(map[string]loader.Sym, nsym)
@@ -1177,16 +1199,11 @@ func (l *ldPatchContext) CreateConstDataSymbol(data []byte, size int64, align in
 // This function reads LLVM-generated symbol data and patches the corresponding
 // Go symbols with updated code, data, and metadata.
 func patchSymbols(ctxt *Link) {
-	if len(ctxt.llvmLTOObjects) == 0 {
-		return
-	}
 	pctxt := &ldPatchContext{Link: ctxt}
 	pctxt.init()
 	for _, object := range ctxt.llvmLTOObjects {
-		b, err := os.ReadFile(object)
-		if err != nil {
+		if err := llvm.PatchFile(pctxt, object, ctxt.Debugvlog); err != nil {
 			Exitf("read TangoLLVM LTO output %q: %v", object, err)
 		}
-		llvm.Patch(pctxt, b, ctxt.Debugvlog)
 	}
 }

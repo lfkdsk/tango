@@ -7,10 +7,10 @@
 package llvm
 
 import (
-	"bytes"
 	"cmd/internal/objabi"
 	"debug/elf"
 	"fmt"
+	"io"
 	"sort"
 )
 
@@ -62,12 +62,15 @@ func (rf *rawElfFile) init() {
 		})
 	}
 
-	for i, section := range rf.f.Sections {
+	for _, section := range rf.f.Sections {
 		if section.Type != elf.SHT_RELA && section.Type != elf.SHT_REL {
 			continue
 		}
 		targetIdx := elf.SectionIndex(section.Info)
-		data := rf.sectionData(elf.SectionIndex(i))
+		data, err := section.Data()
+		if err != nil {
+			panic(err)
+		}
 		rd := relocData{section: section}
 
 		if section.Type == elf.SHT_RELA {
@@ -125,19 +128,20 @@ func (rf *rawElfFile) precomputeRel(rd []byte) []elfRelocInfo {
 }
 
 func (rf *rawElfFile) processRelocations(relocDatas []elfRelocInfo, elfSym elf.Symbol, goSym *TargetSymbol) []TargetReloc {
-	var result []TargetReloc
-
 	start := sort.Search(len(relocDatas), func(i int) bool {
 		return relocDatas[i].off >= elfSym.Value
 	})
-
-	if start == len(relocDatas) || relocDatas[start].off >= elfSym.Value+goSym.Size {
-		return result
+	relocDatas = relocDatas[start:]
+	end := sort.Search(len(relocDatas), func(i int) bool {
+		return relocDatas[i].off >= elfSym.Value+goSym.Size
+	})
+	if end == 0 {
+		return nil
 	}
 
-	for i := start; i < len(relocDatas) && relocDatas[i].off < elfSym.Value+goSym.Size; i++ {
-		reloc := rf.convertElfReloc64(relocDatas[i].off, relocDatas[i].info, relocDatas[i].addend, elfSym, goSym)
-		result = append(result, reloc)
+	result := make([]TargetReloc, end)
+	for i, r := range relocDatas[:end] {
+		result[i] = rf.convertElfReloc64(r.off, r.info, r.addend, elfSym, goSym)
 	}
 
 	return result
@@ -194,7 +198,7 @@ func (rf *rawElfFile) extractSymbolsFromELF() map[string]*TargetSymbol {
 		if elfSym.Section == elf.SHN_UNDEF {
 			continue
 		}
-		if int(elfSym.Section) < 0 || int(elfSym.Section) > len(rf.f.Sections) {
+		if int(elfSym.Section) >= len(rf.f.Sections) {
 			continue
 		}
 		if len(elfSym.Name) == 0 {
@@ -224,8 +228,8 @@ func (rf *rawElfFile) extractSymbolsFromELF() map[string]*TargetSymbol {
 	return symmap
 }
 
-func extractSymbolsFromELF(pctxt PatchContext, b []byte) map[string]*TargetSymbol {
-	f, err := elf.NewFile(bytes.NewReader(b))
+func extractSymbolsFromELF(pctxt PatchContext, r io.ReaderAt) map[string]*TargetSymbol {
+	f, err := elf.NewFile(r)
 	if err != nil {
 		panic(err)
 	}

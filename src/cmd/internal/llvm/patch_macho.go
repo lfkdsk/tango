@@ -7,10 +7,10 @@
 package llvm
 
 import (
-	"bytes"
 	"cmd/internal/objabi"
 	"debug/macho"
 	"fmt"
+	"io"
 	"sort"
 	"strings"
 )
@@ -43,8 +43,7 @@ func lookupMachOSymbol(pctxt PatchContext, name string) TargetSym {
 }
 
 // https://opensource.apple.com/source/xnu/xnu-7195.81.3/EXTERNAL_HEADERS/mach-o/
-func extractSymbolsFromMachO(pctxt PatchContext, b []byte) map[string]*TargetSymbol {
-	r := bytes.NewReader(b)
+func extractSymbolsFromMachO(pctxt PatchContext, r io.ReaderAt) map[string]*TargetSymbol {
 	f, err := macho.NewFile(r)
 	if err != nil {
 		panic(err)

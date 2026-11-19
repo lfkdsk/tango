@@ -65,6 +65,7 @@ import (
 	"cmd/internal/hash"
 	"cmd/internal/objabi"
 	"cmd/internal/sys"
+	"cmd/link/internal/benchmark"
 	"cmd/link/internal/loadelf"
 	"cmd/link/internal/loader"
 	"cmd/link/internal/loadmacho"
@@ -531,7 +532,7 @@ func (ctxt *Link) findLibPath(libname string) string {
 	return ctxt.findLibPathCmd("--print-file-name="+libname, libname)
 }
 
-func (ctxt *Link) loadlib() {
+func (ctxt *Link) loadlib(bench *benchmark.Metrics) {
 	var flags uint32
 	if *flagCheckLinkname {
 		flags |= loader.FlagCheckLinkname
@@ -696,7 +697,10 @@ func (ctxt *Link) loadlib() {
 
 	loadfips(ctxt)
 
-	patchSymbols(ctxt)
+	if len(ctxt.llvmLTOObjects) != 0 {
+		bench.Start("patch-lto")
+		patchSymbols(ctxt)
+	}
 
 	// We've loaded all the code now.
 	ctxt.Loaded = true
