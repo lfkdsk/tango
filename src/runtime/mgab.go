@@ -178,6 +178,19 @@ type gab struct {
 	span     *mspan  // the mspan of current GAB, updated during GAB refilling
 }
 
+// The compiler's GAB inlining (ssagen.gabInline) addresses gp.ab.top and
+// gp.ab.end through the hard-coded internal/abi.GabTopOffset/GabEndOffset
+// constants. If a field is ever inserted into g before ab, the layout drifts
+// without any compiler diagnostic, so the inlined code reads and writes the
+// wrong g slots and corrupts adjacent fields (this has shown up as a runtime
+// initialization deadlock under -opt=beast + GODEBUG=gab=1 after per-goroutine
+// asynchronous preemption register state was added to g). These compile-time
+// assertions turn such offset drift into a build failure.
+var (
+	_ [abi.GabTopOffset]byte = [unsafe.Offsetof(g{}.ab) + unsafe.Offsetof(g{}.ab.top)]byte{}
+	_ [abi.GabEndOffset]byte = [unsafe.Offsetof(g{}.ab) + unsafe.Offsetof(g{}.ab.end)]byte{}
+)
+
 func (buf *gab) clear() {
 	buf.base = nil
 	buf.top = 0
