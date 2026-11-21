@@ -7,6 +7,8 @@ package runtime_test
 import (
 	"internal/cpu"
 	"internal/goexperiment"
+	"os"
+	"strings"
 	"testing"
 )
 
@@ -25,7 +27,28 @@ func TestAsyncPreemptVectorState(t *testing.T) {
 	if !cpu.X86.HasAVX2 {
 		t.Skip("no AVX2")
 	}
-	output := runTestProg(t, "testprog", "AsyncPreemptVector")
+	// testprog has to be built with the experiment that selects the full
+	// save. buildTestProg sets GOEXPERIMENT itself when it is unset, which
+	// replaces the toolchain's default experiments (a TangoLLVM toolchain
+	// enables tangollvm by default), so pass the experiments this test was
+	// built with, and build testprog separately from the shared copy.
+	var flags []string
+	if os.Getenv("GOEXPERIMENT") == "" {
+		var exp []string
+		if goexperiment.TangoLLVM {
+			exp = append(exp, "tangollvm")
+		}
+		if goexperiment.SIMD {
+			exp = append(exp, "simd")
+		}
+		t.Setenv("GOEXPERIMENT", strings.Join(exp, ","))
+		flags = append(flags, "-tags=asyncpreemptvector")
+	}
+	exe, err := buildTestProg(t, "testprog", flags...)
+	if err != nil {
+		t.Fatal(err)
+	}
+	output := runBuiltTestProg(t, exe, "AsyncPreemptVector")
 	want := "OK\n"
 	if output != want {
 		t.Fatalf("want %s, got %s\n", want, output)
