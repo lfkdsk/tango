@@ -106,10 +106,11 @@ TESTS=(largecalleearea slice quicksort intglobal \
     packageinit \
     opendefergc \
     tailcallgc \
-    rodatamat
+    rodatamat \
+    ltopanic1stackobj
 )
 
-DIRTESTS=(linkname abi)
+DIRTESTS=(linkname abi ltostkobj)
 ROOTTESTS=(stackobj3_llvm)
 
 if [[ "$1" == "clean" ]]; then

@@ -96,6 +96,12 @@ type oReader struct {
 // non-package symbols).
 func (r *oReader) NAlldef() int { return r.ndef + r.nhashed64def + r.nhasheddef + r.NNonpkgdef() }
 
+// hashedDef reports whether local symbol li is a content-addressable
+// (hashed) definition.
+func (r *oReader) hashedDef(li uint32) bool {
+	return li >= uint32(r.ndef) && li < uint32(r.ndef+r.nhashed64def+r.nhasheddef)
+}
+
 // objSym represents a symbol in an object file. It is a tuple of
 // the object and the symbol's local index.
 // For external symbols, objidx is the index of l.extReader (extObj),
@@ -306,6 +312,10 @@ type extSymPayload struct {
 
 	// Mark it used for LTO-based modification
 	ltoModified bool
+
+	// hashed records that cloneToExternal made this payload from a
+	// content-addressable definition. See Loader.IsContentAddressable.
+	hashed bool
 }
 
 const (
@@ -687,6 +697,67 @@ func (l *Loader) IterateAllGoSyms(fn func(name string, ver int, s Sym)) {
 			fn(name, v, gi)
 		}
 	}
+}
+
+// IsContentAddressable reports whether i is a content-addressable symbol
+// defined by a Go object, including one that cloneToExternal has since made
+// external. The loader gives every such definition with the same content
+// hash the same global index, so i may be the PCDATA or FUNCDATA of many
+// unrelated functions. Changing i changes it for all of them; to change it
+// for one function, make a new symbol and update that function's reference.
+func (l *Loader) IsContentAddressable(i Sym) bool {
+	r, li := l.toLocal(i)
+	if l.isExtReader(r) {
+		return l.payloads[li].hashed
+	}
+	return r != nil && r.hashedDef(li)
+}
+
+// ChangedHashedSyms calls report for each content-addressable definition in
+// a Go object whose global symbol no longer has the definition's contents.
+// The symbols are shared by content, so the linker must never change one
+// after loading; LTO patching installs new contents in new symbols. A report
+// therefore means some function may now see another function's table.
+// def names the definition as written in its object file.
+func (l *Loader) ChangedHashedSyms(report func(i Sym, pkg, def string)) {
+	for _, r := range l.objs[goObjStart:] {
+		end := uint32(r.ndef + r.nhashed64def + r.nhasheddef)
+		for li := uint32(r.ndef); li < end; li++ {
+			i := r.syms[li]
+			// Only an external symbol can have changed, and one cloned
+			// from r is compared with the definitions in r. Equal
+			// definitions in other objects need no second comparison.
+			cr, pi := l.toLocal(i)
+			if !l.isExtReader(cr) || l.payloads[pi].objidx != r.objidx {
+				continue
+			}
+			if !l.sameContents(i, r, li) {
+				report(i, r.unit.Lib.Pkg, r.Sym(li).Name(r.Reader))
+			}
+		}
+	}
+}
+
+// sameContents reports whether global symbol i has the data and relocations
+// of local definition li of r. Definitions with one content hash may differ
+// in size by trailing zeros, in which case i has the larger size.
+func (l *Loader) sameContents(i Sym, r *oReader, li uint32) bool {
+	if l.SymSize(i) < int64(r.Sym(li).Siz()) ||
+		!bytes.Equal(bytes.TrimRight(l.Data(i), "\x00"), bytes.TrimRight(r.Data(li), "\x00")) {
+		return false
+	}
+	got, want := l.Relocs(i), l.relocs(r, li)
+	if got.Count() != want.Count() {
+		return false
+	}
+	for k := 0; k < got.Count(); k++ {
+		g, w := got.At(k), want.At(k)
+		if g.Off() != w.Off() || g.Siz() != w.Siz() || g.Type() != w.Type() ||
+			g.Add() != w.Add() || g.Weak() != w.Weak() || g.Sym() != w.Sym() {
+			return false
+		}
+	}
+	return true
 }
 
 func (l *Loader) MakeMutableForLTO(i Sym) {
@@ -2826,6 +2897,7 @@ func (l *Loader) cloneToExternal(symIdx Sym) *extSymPayload {
 	pp.ver = sver
 	pp.size = int64(osym.Siz())
 	pp.objidx = r.objidx
+	pp.hashed = r.hashedDef(li)
 
 	// If this is a def, then copy the guts. We expect this case
 	// to be very rare (one case it may come up is with -X).

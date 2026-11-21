@@ -20,6 +20,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"internal/abi"
+	"maps"
 	"os"
 	"reflect"
 	"slices"
@@ -192,17 +193,14 @@ func (l *ldPatchContext) patchPCData(f loader.Sym, id int, pcdata []loader.Sym, 
 	debugPrint(2, "Patch pcdata ", pcId2Name(id), item, v)
 }
 
-// removePCData effectively removes a PCDATA entry by setting it to empty data.
-// This is used when LLVM-compiled code doesn't need certain PC data that
-// the Go compiler would normally generate.
-func (l *ldPatchContext) removePCData(id int, pcdata []loader.Sym) {
-	if id >= len(pcdata) {
-		// PC data slot doesn't exist, nothing to remove
-		return
-	} else {
-		// "Remove" by patching with nil (creates empty data)
-		debugPrint(2, "remove pc data ", id, pcdata[id])
-		l.patchSymbol(pcdata[id], nil)
+// removePCData drops f's reference to a PCDATA table that the LLVM body does
+// not provide. The table is content-addressable and other functions may use
+// it, so it is left as it is.
+func (l *ldPatchContext) removePCData(f loader.Sym, id int) {
+	var tmp [8]*goobj.Aux
+	if auxs := l.loader.DataAuxs(f, goobj.AuxPcdata, tmp[:]); id < len(auxs) {
+		debugPrint(2, "remove pc data ", id)
+		auxs[id].SetSym(goobj.SymRef{})
 	}
 }
 
@@ -848,7 +846,7 @@ func (l *ldPatchContext) PatchPCData(tsym llvm.TargetSym, pcspsym, pcfilesym, pc
 		l.patchSymbol(s.Sym(), pcarglivesym)
 		aux.SetSym(goobj.SymRef{SymIdx: uint32(s.Sym())})
 	} else {
-		l.removePCData(abi.PCDATA_ArgLiveIndex, pcdata)
+		l.removePCData(f, abi.PCDATA_ArgLiveIndex)
 	}
 }
 
@@ -915,14 +913,13 @@ func (l *ldPatchContext) PatchFuncData(fsym llvm.TargetSym, fdid int, fdsymbol *
 					// f is external and its SymVersion is package localSymVersion
 					panic("f must b external to modify")
 				}
-				// TODO: stackobjects are static symbols
-				if _, ok := l.nametab[stkname]; ok {
-					// stkobj may be removed by llvm_patcher
-					return l.nametab[stkname]
-				}
+				// f has no table to copy, so make one. The name table may
+				// still list the gc table that the compile-time patch
+				// detached from f. That symbol is content-addressable: the
+				// loader merged it with every equal table, and patching it
+				// would give those functions the stack objects of f.
 				nsb := ldr.MakeSymbolBuilder(stkname)
 				nsb.SetType(sym.SRODATA)
-				l.nametab[stkname] = nsb.Sym()
 				return nsb.Sym()
 			}
 			l.patchFuncData(f, abi.FUNCDATA_StackObjects, data, fdsymbol, newsym)
@@ -1151,6 +1148,12 @@ func (l *ldPatchContext) makeSymbolUpdater(s loader.Sym) *loader.SymbolBuilder {
 	isItab := ldr.IsItab(s)
 	nAux := ldr.NAux(s)
 
+	// A patch may update in place only what belongs to one function: its
+	// text and funcinfo. Tables shared by content get a new symbol instead.
+	if ldr.IsContentAddressable(s) {
+		panic(fmt.Errorf("LTO patch would update content-addressable symbol %s (%d) in place", name, s))
+	}
+
 	// normally, a symbol updater does not modify aux
 	sb := ldr.MakeSymbolUpdater(s)
 	ldr.MakeMutableForLTO(s)
@@ -1206,4 +1209,51 @@ func patchSymbols(ctxt *Link) {
 			Exitf("read TangoLLVM LTO output %q: %v", object, err)
 		}
 	}
+	if os.Getenv("GOLLVMLTOVERIFY") == "1" {
+		pctxt.verifySharedSyms()
+	}
+}
+
+// verifySharedSyms checks that patching left every content-addressable
+// symbol as its object file defines it, and exits with a report otherwise.
+// It is enabled by GOLLVMLTOVERIFY=1.
+func (l *ldPatchContext) verifySharedSyms() {
+	ldr := l.loader
+	changed := make(map[loader.Sym]string)
+	ldr.ChangedHashedSyms(func(s loader.Sym, pkg, def string) {
+		if _, ok := changed[s]; !ok {
+			if def == "" {
+				def = "unnamed table"
+			}
+			changed[s] = pkg + ": " + def
+		}
+	})
+	if len(changed) == 0 {
+		return
+	}
+	// Functions the patch replaced no longer refer to these symbols. The
+	// rest still do, and now read another function's table.
+	users := make(map[loader.Sym][]loader.Sym)
+	var fdtmp, pctmp [8]loader.Sym
+	for f := loader.Sym(1); f < loader.Sym(ldr.NSym()); f++ {
+		if !ldr.SymType(f).IsText() {
+			continue
+		}
+		pcsp, pcfile, pcline, pcinline, pcdata := ldr.PcdataAuxs(f, pctmp[:])
+		refs := append(ldr.Funcdata(f, fdtmp[:]), pcsp, pcfile, pcline, pcinline)
+		for _, s := range append(refs, pcdata...) {
+			if _, ok := changed[s]; ok && !slices.Contains(users[s], f) {
+				users[s] = append(users[s], f)
+			}
+		}
+	}
+	nusers := 0
+	for _, s := range slices.Sorted(maps.Keys(changed)) {
+		nusers += len(users[s])
+		fmt.Fprintf(os.Stderr, "GOLLVMLTOVERIFY: %s (%d) was changed in place; %d functions use it\n", changed[s], s, len(users[s]))
+		for _, f := range users[s] {
+			fmt.Fprintf(os.Stderr, "GOLLVMLTOVERIFY:\t%s\n", ldr.SymName(f))
+		}
+	}
+	Exitf("GOLLVMLTOVERIFY: LTO patching changed %d content-addressable symbols used by %d functions", len(changed), nusers)
 }
