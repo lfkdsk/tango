@@ -140,6 +140,28 @@ func (g *gen) asmHeader() {
 		fmt.Fprintf(g.w, "#include \"asm_amd64.h\"\n")
 	}
 	fmt.Fprintf(g.w, "#include \"textflag.h\"\n\n")
+	if g.goarch == "amd64" {
+		// The AVX/AVX-512 save and restore paths are needed whenever
+		// compiled Go code can have live upper vector state at an
+		// asynchronous safe point. The standard compiler only produces
+		// such code under GOEXPERIMENT=simd. The TangoLLVM backend
+		// vectorizes ordinary Go loops with YMM registers at GOAMD64=v3
+		// and above, and keeps values in them across instructions that
+		// are asynchronous safe points, with or without the simd
+		// experiment. Saving only the low 128 bits there lets the
+		// scheduler hand back registers whose upper halves belong to
+		// whatever ran on the thread in between.
+		fmt.Fprintf(g.w, "// xRegsSaveVector selects the AVX and AVX-512 save/restore paths.\n")
+		fmt.Fprintf(g.w, "// See genAMD64 in mkpreempt.go.\n")
+		fmt.Fprintf(g.w, "#ifdef GOEXPERIMENT_simd\n")
+		fmt.Fprintf(g.w, "#define xRegsSaveVector\n")
+		fmt.Fprintf(g.w, "#endif\n")
+		fmt.Fprintf(g.w, "#ifdef GOEXPERIMENT_tangollvm\n")
+		fmt.Fprintf(g.w, "#ifndef xRegsSaveVector\n")
+		fmt.Fprintf(g.w, "#define xRegsSaveVector\n")
+		fmt.Fprintf(g.w, "#endif\n")
+		fmt.Fprintf(g.w, "#endif\n\n")
+	}
 	fmt.Fprintf(g.w, "TEXT ·asyncPreempt(SB),NOSPLIT|NOFRAME,$0-0\n")
 }
 
@@ -486,7 +508,7 @@ func genAMD64(g *gen) {
 	p("LEAQ (p_xRegs+xRegPerP_scratch)(BX), %s", xReg)
 
 	// Which registers do we need to save?
-	p("#ifdef GOEXPERIMENT_simd")
+	p("#ifdef xRegsSaveVector")
 	p("CMPB internal∕cpu·X86+const_offsetX86HasAVX512(SB), $1")
 	p("JE saveAVX512")
 	p("CMPB internal∕cpu·X86+const_offsetX86HasAVX2(SB), $1")
@@ -499,7 +521,7 @@ func genAMD64(g *gen) {
 	lXRegs.save(g)
 	p("JMP preempt")
 
-	p("#ifdef GOEXPERIMENT_simd")
+	p("#ifdef xRegsSaveVector")
 	label("saveAVX2Check:")
 	p("// With XINUSE, save the YMM upper halves only when they are")
 	p("// currently non-initialized. Otherwise the interrupted code is")
@@ -572,7 +594,7 @@ func genAMD64(g *gen) {
 	p("MOVB (p_xRegs+xRegPerP_cacheUpper)(BX), DX") // DX = saved component mask
 	p("TESTB DL, DL")
 	p("JE restoreSSE")
-	p("#ifdef GOEXPERIMENT_simd")
+	p("#ifdef xRegsSaveVector")
 	p("CMPB internal∕cpu·X86+const_offsetX86HasAVX512(SB), $1")
 	p("JE restoreAVX512")
 	p("CMPB internal∕cpu·X86+const_offsetX86HasAVX2(SB), $1")
@@ -581,16 +603,16 @@ func genAMD64(g *gen) {
 
 	label("restoreSSE:")
 	lXRegs.restore(g)
-	p("// Upper state was initialized at interrupt time (or no SIMD experiment):")
+	p("// Upper state was initialized at interrupt time (or vector save is off):")
 	p("// leave it initialized instead of reloading stale scratch bytes.")
-	p("#ifdef GOEXPERIMENT_simd")
+	p("#ifdef xRegsSaveVector")
 	p("CMPB internal∕cpu·X86+const_offsetX86HasAVX(SB), $1")
 	p("JNE restoreGPs")
 	p("VZEROUPPER")
 	p("#endif")
 	p("JMP restoreGPs")
 
-	p("#ifdef GOEXPERIMENT_simd")
+	p("#ifdef xRegsSaveVector")
 	label("restoreAVX2:")
 	lYRegs.restore(g)
 	p("JMP restoreGPs")

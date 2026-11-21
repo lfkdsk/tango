@@ -5,6 +5,17 @@
 #include "asm_amd64.h"
 #include "textflag.h"
 
+// xRegsSaveVector selects the AVX and AVX-512 save/restore paths.
+// See genAMD64 in mkpreempt.go.
+#ifdef GOEXPERIMENT_simd
+#define xRegsSaveVector
+#endif
+#ifdef GOEXPERIMENT_tangollvm
+#ifndef xRegsSaveVector
+#define xRegsSaveVector
+#endif
+#endif
+
 TEXT ·asyncPreempt(SB),NOSPLIT|NOFRAME,$0-0
 	PUSHQ BP
 	MOVQ SP, BP
@@ -37,7 +48,7 @@ TEXT ·asyncPreempt(SB),NOSPLIT|NOFRAME,$0-0
 	MOVQ g_m(R14), AX
 	MOVQ m_p(AX), BX
 	LEAQ (p_xRegs+xRegPerP_scratch)(BX), AX
-	#ifdef GOEXPERIMENT_simd
+	#ifdef xRegsSaveVector
 	CMPB internal∕cpu·X86+const_offsetX86HasAVX512(SB), $1
 	JE saveAVX512
 	CMPB internal∕cpu·X86+const_offsetX86HasAVX2(SB), $1
@@ -62,7 +73,7 @@ saveSSE:
 	MOVUPS X14, 896(AX)
 	MOVUPS X15, 960(AX)
 	JMP preempt
-	#ifdef GOEXPERIMENT_simd
+	#ifdef xRegsSaveVector
 saveAVX2Check:
 	// With XINUSE, save the YMM upper halves only when they are
 	// currently non-initialized. Otherwise the interrupted code is
@@ -269,7 +280,7 @@ preempt:
 	MOVB (p_xRegs+xRegPerP_cacheUpper)(BX), DX
 	TESTB DL, DL
 	JE restoreSSE
-	#ifdef GOEXPERIMENT_simd
+	#ifdef xRegsSaveVector
 	CMPB internal∕cpu·X86+const_offsetX86HasAVX512(SB), $1
 	JE restoreAVX512
 	CMPB internal∕cpu·X86+const_offsetX86HasAVX2(SB), $1
@@ -292,15 +303,15 @@ restoreSSE:
 	MOVUPS 128(AX), X2
 	MOVUPS 64(AX), X1
 	MOVUPS 0(AX), X0
-	// Upper state was initialized at interrupt time (or no SIMD experiment):
+	// Upper state was initialized at interrupt time (or vector save is off):
 	// leave it initialized instead of reloading stale scratch bytes.
-	#ifdef GOEXPERIMENT_simd
+	#ifdef xRegsSaveVector
 	CMPB internal∕cpu·X86+const_offsetX86HasAVX(SB), $1
 	JNE restoreGPs
 	VZEROUPPER
 	#endif
 	JMP restoreGPs
-	#ifdef GOEXPERIMENT_simd
+	#ifdef xRegsSaveVector
 restoreAVX2:
 	VMOVDQU 960(AX), Y15
 	VMOVDQU 896(AX), Y14
