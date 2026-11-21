@@ -107,7 +107,8 @@ TESTS=(largecalleearea slice quicksort intglobal \
     opendefergc \
     tailcallgc \
     rodatamat \
-    ltopanic1stackobj
+    ltopanic1stackobj \
+    stackbitmapfe
 )
 
 DIRTESTS=(linkname abi ltostkobj)
